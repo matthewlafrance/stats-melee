@@ -77,12 +77,12 @@ pub struct NewGame {
 #[derive(Insertable)]
 #[diesel(table_name = stage)]
 pub struct NewStage {
-    name: String,
+    pub name: String,
 }
 
 
 #[derive(Insertable)]
 #[diesel(table_name = character)]
 pub struct NewCharacter {
-    name: String,
+    pub name: String,
 }

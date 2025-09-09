@@ -2,7 +2,7 @@ pub mod gamedata;
 pub mod models;
 pub mod schema;
 
-use self::models::{Game, GamePlayer, NewGame, NewGamePlayer, NewPlayer, Player};
+use self::models::{Game, GamePlayer, NewGame, NewGamePlayer, NewPlayer, Player, Stage, NewStage, Character, NewCharacter};
 use anyhow::{anyhow, Result};
 use diesel::prelude::*;
 use dotenvy::dotenv;
@@ -128,13 +128,10 @@ pub fn post_player(conn: &mut SqliteConnection, slippi_player: &SlippiPlayer) ->
         .values(&new_player)
         .returning(Player::as_returning())
         .get_result(conn)
-        .map_err(|_| anyhow!("unable to post player"))
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
-pub fn post_game_player(
-    conn: &mut SqliteConnection,
-    slippi_player: &SlippiPlayer,
-) -> Result<GamePlayer> {
+pub fn post_game_player(conn: &mut SqliteConnection, slippi_player: &SlippiPlayer) -> Result<GamePlayer> {
     use crate::schema::gamePlayer;
 
     post_player(conn, slippi_player)?;
@@ -149,7 +146,7 @@ pub fn post_game_player(
         .values(&new_game_player)
         .returning(GamePlayer::as_returning())
         .get_result(conn)
-        .map_err(|_| anyhow!("unable to post game player"))
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 pub fn post_game(conn: &mut SqliteConnection, gamedata: &GameData) -> Result<Game> {
@@ -180,7 +177,31 @@ pub fn post_game(conn: &mut SqliteConnection, gamedata: &GameData) -> Result<Gam
         .values(&new_game)
         .returning(Game::as_returning())
         .get_result(conn)
-        .map_err(|_| anyhow!("unable to post game player"))
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+pub fn post_stage(conn: &mut SqliteConnection, name: String) -> Result<Stage> {
+    use crate::schema::stage;
+
+    let new_stage = NewStage{ name };
+
+    diesel::insert_into(stage::table)
+        .values(&new_stage)
+        .returning(Stage::as_returning())
+        .get_result(conn)
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+pub fn post_character(conn: &mut SqliteConnection, name: String) -> Result<Character> {
+    use crate::schema::character;
+
+    let new_character = NewCharacter{ name };
+
+    diesel::insert_into(character::table)
+        .values(&new_character)
+        .returning(Character::as_returning())
+        .get_result(conn)
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 fn type_of<T>(_: T) -> &'static str {
