@@ -5,12 +5,6 @@ use melee_anal::*;
 use std::io::{self, Write};
 
 fn main() -> Result<()> {
-    //let mut r = io::BufReader::new(fs::File::open("test_slps/test.slp")?);
-    //let game = read(&mut r, None)?;
-    //let metadata = game.metadata.unwrap();
-    //println!("{:#?}", &metadata["players"]["0"]["characters"]);
-
-    // read_replays()?;
 
     use self::schema::{gamePlayer, player};
 

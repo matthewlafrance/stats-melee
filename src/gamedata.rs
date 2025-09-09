@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use peppi;
+use peppi::{self, game};
 use peppi::game::immutable::Game;
 use serde_json::{map, value};
 use soccer::{Display, Into, TryFrom};
@@ -7,166 +7,6 @@ use std::any::type_name;
 use std::fmt;
 use std::result::Result::Err;
 use std::string;
-
-/*
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFrom, Into)]
-#[repr(u16)]
-pub enum Stage {
-    Dummy,
-    Test,
-    FountainOfDreams,
-    PokemonStadium,
-    PrincessPeachsCastle,
-    KongoJungle,
-    Brinstar,
-    Corneria,
-    YoshisStory,
-    Onett,
-    MuteCity,
-    RainbowCruise,
-    JungleJapes,
-    GreatBay,
-    HyruleTemple,
-    BrinstarDepths,
-    YoshisIsland,
-    GreenGreens,
-    Fourside,
-    MushroomKingdomI,
-    MushroomKingdomII,
-    Akaneia,
-    Venom,
-    PokeFloats,
-    BigBlue,
-    IcicleMountain,
-    Icetop,
-    FlatZone,
-    DreamLandN64,
-    YoshisIslandN64,
-    KongoJungleN64,
-    Battlefield,
-    FinalDestination,
-}
-
-impl fmt::Display for Stage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Stage::Dummy => "Dummy",
-            Stage::Test => "Test",
-            Stage::FountainOfDreams => "Fountain Of Dreams",
-            Stage::PokemonStadium => "Pokemon Stadium",
-            Stage::PrincessPeachsCastle => "Princess Peach's Castle",
-            Stage::KongoJungle => "Kongo Jungle",
-            Stage::Brinstar => "Brinstar",
-            Stage::Corneria => "Corneria",
-            Stage::YoshisStory => "Yoshis Story",
-            Stage::Onett => "Onett",
-            Stage::MuteCity => "Mute City",
-            Stage::RainbowCruise => "Rainbow Cruise",
-            Stage::JungleJapes => "Jungle Japes",
-            Stage::GreatBay => "Great Bay",
-            Stage::HyruleTemple => "Hyrule Temple",
-            Stage::BrinstarDepths => "Brinstar Depths",
-            Stage::YoshisIsland => "Yoshis Island",
-            Stage::GreenGreens => "Green Greens",
-            Stage::Fourside => "Fourside",
-            Stage::MushroomKingdomI => "Mushroom Kingdom I",
-            Stage::MushroomKingdomII => "Mushroom Kingdom II",
-            Stage::Akaneia => "Akaneia",
-            Stage::Venom => "Venom",
-            Stage::PokeFloats => "Poke Floats",
-            Stage::BigBlue => "Big Blue",
-            Stage::IcicleMountain => "Icicle Mountain",
-            Stage::Icetop => "Icetop",
-            Stage::FlatZone => "Flat Zone",
-            Stage::DreamLandN64 => "Dream Land N64",
-            Stage::YoshisIslandN64 => "Yoshis Island N64",
-            Stage::KongoJungleN64 => "Kongo Jungle N64",
-            Stage::Battlefield => "Battlefield",
-            Stage::FinalDestination => "Final Destination",
-        };
-        write!(f, "{}", name)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFrom, Into)]
-#[repr(i32)]
-pub enum Character {
-    Mario,
-    Fox,
-    CaptainFalcon,
-    DonkeyKong,
-    Kirby,
-    Bowser,
-    Link,
-    Sheik,
-    Ness,
-    Peach,
-    Popo,
-    Nana,
-    Pikachu,
-    Samus,
-    Yoshi,
-    Jigglypuff,
-    Mewtwo,
-    Luigi,
-    Marth,
-    Zelda,
-    YoungLink,
-    DrMario,
-    Falco,
-    Pichu,
-    GameAndWatch,
-    Ganondorf,
-    Roy,
-    MasterHand,
-    CrazyHand,
-    WireFrameMale,
-    WireFrameFemale,
-    GigaBowser,
-    Sandbag,
-}
-
-impl fmt::Display for Character {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Character::Mario => "Mario",
-            Character::Fox => "Fox",
-            Character::CaptainFalcon => "CaptainFalcon",
-            Character::DonkeyKong => "DonkeyKong",
-            Character::Kirby => "Kirby",
-            Character::Bowser => "Bowser",
-            Character::Link => "Link",
-            Character::Sheik => "Sheik",
-            Character::Ness => "Ness",
-            Character::Peach => "Peach",
-            Character::Popo => "Popo",
-            Character::Nana => "Nana",
-            Character::Pikachu => "Pikachu",
-            Character::Samus => "Samus",
-            Character::Yoshi => "Yoshi",
-            Character::Jigglypuff => "Jigglypuff",
-            Character::Mewtwo => "Mewtwo",
-            Character::Luigi => "Luigi",
-            Character::Marth => "Marth",
-            Character::Zelda => "Zelda",
-            Character::YoungLink => "YoungLink",
-            Character::DrMario => "DrMario",
-            Character::Falco => "Falco",
-            Character::Pichu => "Pichu",
-            Character::GameAndWatch => "GameAndWatch",
-            Character::Ganondorf => "Ganondorf",
-            Character::Roy => "Roy",
-            Character::MasterHand => "MasterHand",
-            Character::CrazyHand => "CrazyHand",
-            Character::WireFrameMale => "WireFrameMale",
-            Character::WireFrameFemale => "WireFrameFemale",
-            Character::GigaBowser => "GigaBowser",
-            Character::Sandbag => "Sandbag",
-        };
-        write!(f, "{}", name)
-    }
-}
-*/
 
 #[derive(Debug)]
 pub struct GameData {
@@ -178,12 +18,18 @@ pub struct GameData {
 impl GameData {
     pub fn new_gamedata(game: &peppi::game::immutable::Game) -> Result<GameData> {
         let metadata = game.metadata.as_ref().ok_or(anyhow!("no metadata found"))?;
-        let placements = [
-            SlippiPlayer::new_slippi_player(metadata, Port::P0),
-            SlippiPlayer::new_slippi_player(metadata, Port::P1),
-            SlippiPlayer::new_slippi_player(metadata, Port::P2),
-            SlippiPlayer::new_slippi_player(metadata, Port::P3),
-        ];
+        let players = game.end.clone().ok_or(anyhow!("error"))?.players.ok_or(anyhow!("error"))?;
+        let mut placements: [Option<SlippiPlayer>; 4] = [None, None, None, None];
+
+        for (i, player) in players.iter().enumerate() {
+            placements[i] = SlippiPlayer::new_slippi_player(metadata, match player.port {
+                game::Port::P1 => Port::P0,
+                game::Port::P2 => Port::P1,
+                game::Port::P3 => Port::P2,
+                game::Port::P4 => Port::P3,
+            });
+        }
+
         let stage = game.start.stage as i32;
         let time = Self::game_len(&game)?;
 
@@ -278,8 +124,6 @@ impl SlippiPlayer {
             }
         };
 
-        // let character = Character::try_from(character.parse::<i32>().ok()?).ok()?;
-
         let character = character.parse::<i32>().ok()?;
 
         Some(SlippiPlayer {
@@ -307,6 +151,6 @@ impl SlippiPlayer {
     }
 }
 
-fn type_of<T>(_: T) -> &'static str {
+pub fn type_of<T>(_: T) -> &'static str {
     type_name::<T>()
 }
