@@ -5,27 +5,38 @@ pub mod schema;
 use self::models::{Game, GamePlayer, NewGame, NewGamePlayer, NewPlayer, Player, Stage, NewStage, Character, NewCharacter};
 use anyhow::{anyhow, Result};
 use diesel::prelude::*;
+use diesel::dsl;
 use dotenvy::dotenv;
 use gamedata::{GameData, Port, SlippiPlayer};
 use peppi::game::immutable;
 use peppi::io::slippi;
 use serde_json::{map, value};
 use std::any::type_name;
-use std::env;
-use std::fs;
+use std::{env, fs, string};
 use std::io::{self, Write};
-use std::string;
+
 
 pub fn parse_replays() -> Result<()> {
     let test = false;
 
+    /*
     let mut playtime_s = 0;
     let mut playtime_m = 0;
+    */
+
+    // prompt user for code
 
     let dir_path = env::current_dir()?;
     let dir = fs::read_dir(dir_path)?;
 
+    let mut connection = establish_connection()?;
+
+    let games_empty = is_games_empty(&mut connection)?;
+
+    let last_game_added = fs::metadata(database_url()?)?.modified()?;
+
     for sub_dir in dir {
+
         let sub_dir = sub_dir?;
 
         let sub_dir_path = sub_dir.path();
@@ -47,56 +58,67 @@ pub fn parse_replays() -> Result<()> {
                 let replay = replay?;
 
                 let replay_path = replay.path();
-                let mut r = io::BufReader::new(fs::File::open(replay_path)?);
 
-                let game = slippi::read(&mut r, None)?;
+                let replay_system_time = replay.metadata()?.created()?;
 
-                if test {
-                    println!("{:?}", game);
-                }
+                // adds new replays to db
+                if games_empty || replay_system_time > last_game_added {
 
-                let gamedata = GameData::new_gamedata(&game);
+                    let mut r = io::BufReader::new(fs::File::open(replay_path)?);
 
-                let gamedata = match gamedata {
-                    Ok(g) => g,
-                    Err(e) => {
-                        println!("Error parsing gamedata: {}", e);
-                        continue;
+                    let game = slippi::read(&mut r, None)?;
+
+                    let metadata = &game.metadata;
+
+                    if test {
+                        println!("{:?}", game);
                     }
-                };
 
-                let mut gametime_s = gamedata.time();
-                let gametime_m = gametime_s / 60;
-                gametime_s = gametime_s % 60;
-                playtime_s += gametime_s;
-                playtime_m += gametime_m;
+                    let gamedata = GameData::new_gamedata(&game)?;
 
-                println!(
-                    "--game {} played on {} for {}:{}--",
-                    gamecount,
-                    gamedata.stage(),
-                    gametime_m,
-                    gametime_s
-                );
+                    println!("adding game to db...");
 
-                for player in gamedata.placements() {
-                    if let Some(p) = player {
-                        println!("{}: {} - {}", p.port(), p.code(), p.character());
+                    // post game to db here
+
+                    /*
+                    let mut gametime_s = gamedata.time();
+                    let gametime_m = gametime_s / 60;
+                    gametime_s = gametime_s % 60;
+                    playtime_s += gametime_s;
+                    playtime_m += gametime_m;
+
+                    println!(
+                        "--game {} played on {} for {}:{}--",
+                        gamecount,
+                        gamedata.stage(),
+                        gametime_m,
+                        gametime_s
+                    );
+
+                    for player in gamedata.placements() {
+                        if let Some(p) = player {
+                            println!("{}: {} - {}", p.port(), p.code(), p.character());
+                        }
+                    }
+
+                    println!("");
+
+                    gamecount += 1;
+                    
+                    */
+
+                    if test {
+                        println!("{}", type_of(game));
+                        break;
                     }
                 }
 
-                println!("");
-
-                gamecount += 1;
-
-                if test {
-                    println!("{}", type_of(game));
-                    break;
-                }
+                // query db and print results
             }
         }
     }
 
+    /*
     let playtime_h = playtime_m / 60;
     playtime_m = playtime_m % 60;
 
@@ -104,13 +126,15 @@ pub fn parse_replays() -> Result<()> {
         "total playtime: {}:{}:{}",
         playtime_h, playtime_m, playtime_s
     );
+    */
+
     Ok(())
 }
 
 pub fn establish_connection() -> Result<SqliteConnection> {
     dotenv().ok();
 
-    let database_url = env::var("DATABASE_URL").map_err(|_| anyhow!("no database url found"))?;
+    let database_url = database_url()?;
 
     SqliteConnection::establish(&database_url)
         .map_err(|e| anyhow!("Error connecting to {}", database_url))
@@ -202,6 +226,18 @@ pub fn post_character(conn: &mut SqliteConnection, name: String) -> Result<Chara
         .returning(Character::as_returning())
         .get_result(conn)
         .map_err(|e| anyhow!(e.to_string()))
+}
+
+pub fn is_games_empty(conn: &mut SqliteConnection) -> Result<bool> {
+    use crate::schema::game::dsl::*;
+
+    let count: i64 = game.select(dsl::count_star()).first(conn)?;
+    
+    Ok(count == 0)
+}
+
+pub fn database_url() -> Result<String> {
+    env::var("DATABASE_URL").map_err(|_| anyhow!("no database url found")) 
 }
 
 fn type_of<T>(_: T) -> &'static str {

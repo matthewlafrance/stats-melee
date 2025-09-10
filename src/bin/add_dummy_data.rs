@@ -2,7 +2,7 @@ use self::gamedata::*;
 use self::models::*;
 use anyhow::{anyhow, Result};
 use diesel::prelude::*;
-use melee_anal::*;
+use stats_melee::*;
 use std::io::{self, Write};
 
 fn main() -> Result<()> {
