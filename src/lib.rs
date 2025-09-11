@@ -1,8 +1,11 @@
 pub mod gamedata;
+pub mod analytics;
 pub mod models;
 pub mod schema;
 
+
 use self::models::{Game, GamePlayer, NewGame, NewGamePlayer, NewPlayer, Player, Stage, NewStage, Character, NewCharacter};
+use self::analytics::{WinProportion, WinAnalytics};
 use anyhow::{anyhow, Result};
 use diesel::prelude::*;
 use diesel::dsl;
@@ -14,6 +17,7 @@ use serde_json::{map, value};
 use std::any::type_name;
 use std::{env, fs, string};
 use std::io::{self, Write};
+use std::collections::HashMap;
 
 
 pub fn parse_new_replays(conn: &mut SqliteConnection) -> Result<usize> {
@@ -93,6 +97,58 @@ pub fn filter_games(conn: &mut SqliteConnection, code: &str) -> Result<Vec<Game>
         .filter(gamePlayer::code.eq(code))
         .select(game::all_columns)
         .load::<Game>(conn).map_err(|e| anyhow!(e.to_string()))
+}
+
+pub fn analyze_games(conn: &mut SqliteConnection, games: &Vec<Game>, player_code: &str) -> Result<WinAnalytics> {
+
+    let mut opponents: HashMap<String, WinProportion> = HashMap::new();
+    let mut stages: HashMap<i32, WinProportion> = HashMap::new();
+    let mut played_characters: HashMap<i32, WinProportion> = HashMap::new();
+    let mut opp_characters: HashMap<i32, WinProportion> = HashMap::new();
+
+    for game in games {
+
+        let mut codes = [None, None, None, None];
+        
+        if let Some(f) = game.first {
+            codes[0] = Some(get_game_player_code(conn, f)?);
+        }
+
+        if let Some(s) = game.second {
+            codes[1] = Some(get_game_player_code(conn, s)?);
+        }
+
+        if let Some(t) = game.third {
+            codes[2] = Some(get_game_player_code(conn, t)?);
+        }
+
+        if let Some(f) = game.fourth {
+            codes[3] = Some(get_game_player_code(conn, f)?);
+        }
+
+        let player_won = codes[0].clone().ok_or(anyhow!("no winner found"))? == player_code;
+
+        for code in codes {
+            if let Some(c) = code {
+                if c != player_code {
+                    let entry = opponents.entry(c).or_insert(WinProportion {wins: 0, total : 0});
+
+                    if player_won {
+                        entry.wins += 1;
+                    }
+
+                    entry.total += 1;
+                }
+            }
+        }
+    }
+
+    Ok(WinAnalytics {
+        opponents,
+        stages,
+        played_characters,
+        opp_characters,
+    })
 }
 
 pub fn establish_connection() -> Result<SqliteConnection> {
@@ -226,6 +282,11 @@ pub fn insert_or_get_game_player(conn: &mut SqliteConnection, new_game_player: &
     }
 }
 
+pub fn get_game_player_code(conn: &mut SqliteConnection, id: i32) -> Result<String> {
+    use crate::schema::gamePlayer::dsl::*;
+
+    gamePlayer.filter(id.eq(id)).select(code).first::<String>(conn).map_err(|e| anyhow!(e.to_string()))
+}
 
 pub fn is_games_empty(conn: &mut SqliteConnection) -> Result<bool> {
 

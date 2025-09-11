@@ -19,9 +19,7 @@ fn main() -> Result<()> {
 
     let games = filter_games(&mut connection, &code)?;
 
-    for game in games {
-        println!("{:?}", game);
-    }
+    let analytics = analyze_games(&mut connection, &games, &code);
 
     Ok(())
 }

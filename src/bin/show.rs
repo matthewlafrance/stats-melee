@@ -36,7 +36,7 @@ fn main() -> Result<()> {
             for game_player in game_players {
                 println!(
                     "{} -- {} -- {} -- {}",
-                    game_player.id, game_player.netplay, game_player.character, game_player.port
+                    game_player.id, game_player.code, game_player.character, game_player.port
                 );
             }
         }
