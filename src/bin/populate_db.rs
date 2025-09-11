@@ -84,12 +84,12 @@ fn main() -> Result<()> {
         "Sandbag",
     ];
 
-    for stage in stages {
-        post_stage(&mut connection, stage.to_owned())?;
+    for (id, stage) in stages.iter().enumerate() {
+        post_stage(&mut connection, id as i32, stage.to_string())?;
     }
 
-    for character in characters {
-        post_character(&mut connection, character.to_owned())?;
+    for (id, character) in characters.iter().enumerate() {
+        post_character(&mut connection, id as i32, character.to_string())?;
     }
 
     println!("database successfully populated");

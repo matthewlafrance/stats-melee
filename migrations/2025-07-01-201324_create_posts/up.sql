@@ -1,17 +1,17 @@
 -- Table: player
 CREATE TABLE player (
-    netplay TEXT PRIMARY KEY NOT NULL,
-    code TEXT NOT NULL
+    code TEXT PRIMARY KEY NOT NULL,
+    netplay TEXT NOT NULL
 );
 
 CREATE TABLE gamePlayer (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    netplay TEXT NOT NULL,
+    code TEXT NOT NULL,
     character INTEGER NOT NULL CHECK (character >= 0 AND character <= 32),
     port INTEGER NOT NULL CHECK (port >= 0 AND port <= 3),
 
-    UNIQUE(netplay, character, port),
-    FOREIGN KEY (netplay) REFERENCES player(netplay)
+    UNIQUE(code, character, port),
+    FOREIGN KEY (code) REFERENCES player(code)
 );
 
 -- Table: game
@@ -28,12 +28,12 @@ CREATE TABLE game (
     time INTEGER NOT NULL CHECK (time >= 0),
 
     -- At least one player must be non-null
-    -- CHECK (
-        -- first IS NOT NULL OR
-        -- second IS NOT NULL OR
-        -- third IS NOT NULL OR
-        --fourth IS NOT NULL
-    -- ),
+    CHECK (
+        first IS NOT NULL OR
+        second IS NOT NULL OR
+        third IS NOT NULL OR
+        fourth IS NOT NULL
+    ),
 
     -- Foreign key references to player table
     FOREIGN KEY (first) REFERENCES gamePlayer(id),
@@ -43,11 +43,11 @@ CREATE TABLE game (
 );
 
 CREATE TABLE stage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL CHECK (id >= 0 AND id <= 32),
+    id INTEGER PRIMARY KEY  NOT NULL CHECK (id >= 0 AND id <= 32),
     name TEXT NOT NULL
 );
 
 CREATE TABLE character (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL CHECK (id >= 0 AND id <= 32),
+    id INTEGER PRIMARY KEY  NOT NULL CHECK (id >= 0 AND id <= 32),
     name TEXT NOT NULL
 );

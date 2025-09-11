@@ -1,7 +1,7 @@
 use crate::schema::{game, gamePlayer, player, stage, character};
 use diesel::prelude::*;
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Debug)]
 #[diesel(table_name = crate::schema::game)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Game {
@@ -27,7 +27,7 @@ pub struct Player {
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct GamePlayer {
     pub id: i32,
-    pub netplay: String,
+    pub code: String,
     pub character: i32,
     pub port: i32,
 }
@@ -51,14 +51,14 @@ pub struct Character {
 #[derive(Insertable)]
 #[diesel(table_name = player)]
 pub struct NewPlayer<'a> {
-    pub netplay: &'a str,
     pub code: &'a str,
+    pub netplay: &'a str,
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = gamePlayer)]
 pub struct NewGamePlayer<'a> {
-    pub netplay: &'a str,
+    pub code: &'a str,
     pub character: i32,
     pub port: i32,
 }
@@ -77,6 +77,7 @@ pub struct NewGame {
 #[derive(Insertable)]
 #[diesel(table_name = stage)]
 pub struct NewStage {
+    pub id: i32,
     pub name: String,
 }
 
@@ -84,5 +85,6 @@ pub struct NewStage {
 #[derive(Insertable)]
 #[diesel(table_name = character)]
 pub struct NewCharacter {
+    pub id: i32,
     pub name: String,
 }

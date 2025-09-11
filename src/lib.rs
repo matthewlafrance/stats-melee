@@ -16,26 +16,16 @@ use std::{env, fs, string};
 use std::io::{self, Write};
 
 
-pub fn parse_replays() -> Result<()> {
+pub fn parse_new_replays(conn: &mut SqliteConnection) -> Result<usize> {
     let test = false;
-
-    /*
-    let mut playtime_s = 0;
-    let mut playtime_m = 0;
-    */
 
     let dir_path = env::current_dir()?;
     let dir = fs::read_dir(dir_path)?;
 
-    let mut connection = establish_connection()?;
-    let games_empty = is_games_empty(&mut connection)?;
-    let last_game_added = fs::metadata(database_url()?)?.modified()?;
+    let games_empty = is_games_empty(conn)?;
+    let db_modified = fs::metadata(database_url()?)?.modified()?;
 
-    let newline = true;
-    let netcode = prompt_user("enter netcode", newline)?;
-    let netcode = netcode.trim_end();
-
-    println!("analyzing games for {}...", netcode);
+    let mut gamecount: usize = 0;
 
     for sub_dir in dir {
 
@@ -54,18 +44,19 @@ pub fn parse_replays() -> Result<()> {
                 }
             }
 
-            let mut gamecount: usize = 1;
+            let sub_dir_modified = sub_dir.metadata()?.modified()?;
+
+            if !games_empty && sub_dir_modified < db_modified {
+                continue;
+            }
 
             for replay in fs::read_dir(sub_dir_path)? {
 
                 let replay = replay?;
                 let replay_path = replay.path();
-                let replay_system_time = replay.metadata()?.created()?;
+                let replay_created = replay.metadata()?.created()?;
 
-                // println!("replay: {:?} - last game: {:?} - {}", replay_system_time, last_game_added, replay_system_time > last_game_added);
-
-                // adds new replays to db
-                if games_empty || replay_system_time > last_game_added {
+                if games_empty || replay_created > db_modified {
 
                     let mut r = io::BufReader::new(fs::File::open(replay_path)?);
                     let game = slippi::read(&mut r, None)?;
@@ -73,68 +64,35 @@ pub fn parse_replays() -> Result<()> {
                     let gamedata = GameData::new_gamedata(&game)?;
                     let players = gamedata.placements();
 
-                    post_game(&mut connection, &gamedata)?;
-
-
-                    if test {
-                        println!("{:?}", game);
-                    }
-
-                    println!("adding game to db...");
-
-                    // post game to db here
-
-
-
-                    /*
-                    let mut gametime_s = gamedata.time();
-                    let gametime_m = gametime_s / 60;
-                    gametime_s = gametime_s % 60;
-                    playtime_s += gametime_s;
-                    playtime_m += gametime_m;
-
-                    println!(
-                        "--game {} played on {} for {}:{}--",
-                        gamecount,
-                        gamedata.stage(),
-                        gametime_m,
-                        gametime_s
-                    );
-
-                    for player in gamedata.placements() {
-                        if let Some(p) = player {
-                            println!("{}: {} - {}", p.port(), p.code(), p.character());
-                        }
-                    }
-
-                    println!("");
+                    post_game(conn, &gamedata)?;
 
                     gamecount += 1;
-                    
-                    */
 
-                    if test {
-                        println!("{}", type_of(game));
-                        break;
-                    }
                 }
-
-                // query db and print results
             }
         }
     }
 
-    /*
-    let playtime_h = playtime_m / 60;
-    playtime_m = playtime_m % 60;
+    Ok(gamecount)
+}
 
-    println!(
-        "total playtime: {}:{}:{}",
-        playtime_h, playtime_m, playtime_s
-    );
-    */
+pub fn filter_games(conn: &mut SqliteConnection, code: &str) -> Result<Vec<Game>> {
 
-    Ok(())
+    use crate::schema::{game, gamePlayer};
+
+    game::table
+        .inner_join(
+            gamePlayer::table.on(
+                game::first
+                    .eq(gamePlayer::id.nullable())
+                    .or(game::second.eq(gamePlayer::id.nullable()))
+                    .or(game::third.eq(gamePlayer::id.nullable()))
+                    .or(game::fourth.eq(gamePlayer::id.nullable())),
+            ),
+        )
+        .filter(gamePlayer::code.eq(code))
+        .select(game::all_columns)
+        .load::<Game>(conn).map_err(|e| anyhow!(e.to_string()))
 }
 
 pub fn establish_connection() -> Result<SqliteConnection> {
@@ -154,17 +112,6 @@ pub fn post_player(conn: &mut SqliteConnection, slippi_player: &SlippiPlayer) ->
         code: slippi_player.code(),
     };
 
-    println!("herro");
-    /*
-    diesel::insert_or_ignore_into(player::table)
-        .values(&new_player)
-        .on_conflict(player::code)
-        .do_nothing()
-        .returning(Player::as_returning())
-        .get_result(conn)
-        .map_err(|e| anyhow!(e.to_string()))
-    */
-
     Ok(insert_or_get_player(conn, &new_player)?)
 }
 
@@ -175,21 +122,10 @@ pub fn post_game_player(conn: &mut SqliteConnection, slippi_player: &SlippiPlaye
 
 
     let new_game_player = NewGamePlayer {
-        netplay: slippi_player.netplay(),
+        code: slippi_player.code(),
         character: slippi_player.character().into(),
         port: slippi_player.port().into(),
     };
-
-    // FIX THE GET RESULT INTO EXECUTE
-    /*
-    diesel::insert_or_ignore_into(gamePlayer::table)
-        .values(&new_game_player)
-        .on_conflict(gamePlayer::code)
-        .do_nothing()
-        .returning(GamePlayer::as_returning())
-        .get_result(conn)
-        .map_err(|e| anyhow!(e.to_string()))
-    */
 
     Ok(insert_or_get_game_player(conn, &new_game_player)?)
 }
@@ -226,10 +162,10 @@ pub fn post_game(conn: &mut SqliteConnection, gamedata: &GameData) -> Result<Gam
         .map_err(|e| anyhow!(e.to_string()))
 }
 
-pub fn post_stage(conn: &mut SqliteConnection, name: String) -> Result<Stage> {
+pub fn post_stage(conn: &mut SqliteConnection, id: i32, name: String) -> Result<Stage> {
     use crate::schema::stage;
 
-    let new_stage = NewStage{ name };
+    let new_stage = NewStage{ id, name };
 
     diesel::insert_into(stage::table)
         .values(&new_stage)
@@ -238,10 +174,10 @@ pub fn post_stage(conn: &mut SqliteConnection, name: String) -> Result<Stage> {
         .map_err(|e| anyhow!(e.to_string()))
 }
 
-pub fn post_character(conn: &mut SqliteConnection, name: String) -> Result<Character> {
+pub fn post_character(conn: &mut SqliteConnection, id: i32, name: String) -> Result<Character> {
     use crate::schema::character;
 
-    let new_character = NewCharacter{ name };
+    let new_character = NewCharacter{ id, name };
 
     diesel::insert_into(character::table)
         .values(&new_character)
@@ -255,7 +191,7 @@ pub fn insert_or_get_player(conn: &mut SqliteConnection, new_player: &NewPlayer)
 
     if let Some(inserted) = diesel::insert_into(player)
         .values(new_player)
-        .on_conflict(netplay)
+        .on_conflict(code)
         .do_nothing()
         .returning(Player::as_returning())
         .get_result(conn)
@@ -274,7 +210,7 @@ pub fn insert_or_get_game_player(conn: &mut SqliteConnection, new_game_player: &
 
     if let Some(inserted) = diesel::insert_into(gamePlayer)
         .values(new_game_player)
-        .on_conflict((netplay, character, port))
+        .on_conflict((code, character, port))
         .do_nothing()
         .returning(GamePlayer::as_returning())
         .get_result(conn)
@@ -283,7 +219,7 @@ pub fn insert_or_get_game_player(conn: &mut SqliteConnection, new_game_player: &
         Ok(inserted)
     } else {
         gamePlayer
-            .filter(netplay.eq(&new_game_player.netplay))
+            .filter(code.eq(&new_game_player.code))
             .filter(character.eq(new_game_player.character))
             .filter(port.eq(new_game_player.port))
             .first::<GamePlayer>(conn)
@@ -311,6 +247,7 @@ pub fn prompt_user(prompt: &str, newline: bool) -> Result<String> {
     io::stdout().flush()?;
     let mut response = String::new();
     io::stdin().read_line(&mut response)?;
+    let response = response.trim_end().to_owned();
     Ok(response)
 }
 

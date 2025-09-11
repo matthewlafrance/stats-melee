@@ -6,4 +6,4 @@ file = "src/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]
 
 [migrations_directory]
-dir = "/Users/matthewlafrance/Dev/melee-anal/migrations"
+dir = "/Users/matthewlafrance/Dev/stats-melee/migrations"

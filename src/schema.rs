@@ -22,16 +22,16 @@ diesel::table! {
 diesel::table! {
     gamePlayer (id) {
         id -> Integer,
-        netplay -> Text,
+        code -> Text,
         character -> Integer,
         port -> Integer,
     }
 }
 
 diesel::table! {
-    player (netplay) {
-        netplay -> Text,
+    player (code) {
         code -> Text,
+        netplay -> Text,
     }
 }
 
@@ -42,7 +42,7 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(gamePlayer -> player (netplay));
+diesel::joinable!(gamePlayer -> player (code));
 
 diesel::allow_tables_to_appear_in_same_query!(
     character,
