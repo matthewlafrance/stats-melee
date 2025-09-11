@@ -28,12 +28,12 @@ CREATE TABLE game (
     time INTEGER NOT NULL CHECK (time >= 0),
 
     -- At least one player must be non-null
-    CHECK (
-        first IS NOT NULL OR
-        second IS NOT NULL OR
-        third IS NOT NULL OR
-        fourth IS NOT NULL
-    ),
+    -- CHECK (
+        -- first IS NOT NULL OR
+        -- second IS NOT NULL OR
+        -- third IS NOT NULL OR
+        --fourth IS NOT NULL
+    -- ),
 
     -- Foreign key references to player table
     FOREIGN KEY (first) REFERENCES gamePlayer(id),
