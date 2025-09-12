@@ -26,7 +26,8 @@ pub static NUM_CHARACTERS: usize = 33;
 pub fn parse_new_replays(conn: &mut SqliteConnection) -> Result<usize> {
     let test = false;
 
-    let dir_path = env::current_dir()?;
+    let mut dir_path = env::current_dir()?;
+    dir_path.push("..");
     let dir = fs::read_dir(dir_path)?;
 
     let games_empty = is_games_empty(conn)?;
@@ -45,6 +46,7 @@ pub fn parse_new_replays(conn: &mut SqliteConnection) -> Result<usize> {
                 if name == "target"
                     || name == "src"
                     || name == "migrations"
+                    || name == "stats-melee"
                     || name.to_string_lossy().starts_with('.')
                 {
                     continue;
