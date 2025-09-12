@@ -19,6 +19,9 @@ use std::{env, fs, string};
 use std::io::{self, Write};
 use std::collections::HashMap;
 
+pub static NUM_STAGES: usize = 33;
+pub static NUM_CHARACTERS: usize = 33;
+
 
 pub fn parse_new_replays(conn: &mut SqliteConnection) -> Result<usize> {
     let test = false;
@@ -102,45 +105,80 @@ pub fn filter_games(conn: &mut SqliteConnection, code: &str) -> Result<Vec<Game>
 pub fn analyze_games(conn: &mut SqliteConnection, games: &Vec<Game>, player_code: &str) -> Result<WinAnalytics> {
 
     let mut opponents: HashMap<String, WinProportion> = HashMap::new();
-    let mut stages: HashMap<i32, WinProportion> = HashMap::new();
-    let mut played_characters: HashMap<i32, WinProportion> = HashMap::new();
-    let mut opp_characters: HashMap<i32, WinProportion> = HashMap::new();
+    let mut stages = [WinProportion::new_winproportion(); NUM_STAGES];
+    let mut played_characters = [WinProportion::new_winproportion(); NUM_CHARACTERS];
+    let mut opp_characters = [WinProportion::new_winproportion(); NUM_CHARACTERS];
 
     for game in games {
 
         let mut codes = [None, None, None, None];
+        let mut characters = [None, None, None, None];
         
         if let Some(f) = game.first {
             codes[0] = Some(get_game_player_code(conn, f)?);
+            characters[0] = Some(get_character(conn, f)?);
         }
 
         if let Some(s) = game.second {
             codes[1] = Some(get_game_player_code(conn, s)?);
+            characters[1] = Some(get_character(conn, s)?);
         }
 
         if let Some(t) = game.third {
             codes[2] = Some(get_game_player_code(conn, t)?);
+            characters[2] = Some(get_character(conn, t)?);
         }
 
         if let Some(f) = game.fourth {
             codes[3] = Some(get_game_player_code(conn, f)?);
+            characters[3] = Some(get_character(conn, f)?);
         }
 
-        let player_won = codes[0].clone().ok_or(anyhow!("no winner found"))? == player_code;
+        let player_won = codes[0] == Some(player_code.to_string());
 
-        for code in codes {
-            if let Some(c) = code {
-                if c != player_code {
-                    let entry = opponents.entry(c).or_insert(WinProportion {wins: 0, total : 0});
+        for (code_option, character_option) in codes.iter().zip(characters.iter()) {
+            if let Some(code) = code_option {
+                let character = character_option.ok_or(anyhow!("no character found for player"))?;
+
+                if code != player_code {
+                    let opps_winproportion = opponents.entry(code.to_string()).or_insert(WinProportion::new_winproportion());
 
                     if player_won {
-                        entry.wins += 1;
+                        opps_winproportion.wins += 1;
+                        opp_characters[character as usize].wins += 1;
                     }
 
-                    entry.total += 1;
+                    opps_winproportion.total += 1;
+                    opp_characters[character as usize].total += 1;
+                } else {
+
+                    if player_won {
+                        played_characters[character as usize].wins += 1;
+                    }
+
+                    played_characters[character as usize].total += 1;
                 }
             }
         }
+
+        if player_won {
+            stages[game.stage as usize].wins += 1;
+        }
+
+        stages[game.stage as usize].total += 1;
+    }
+
+    for opp_winproportion in opponents.values_mut() {
+        opp_winproportion.update_proportion();
+    }
+
+    for i in 0..NUM_STAGES {
+        stages[i].update_proportion();
+    }
+
+    for i in 0..NUM_CHARACTERS {
+        played_characters[i].update_proportion();
+        opp_characters[i].update_proportion();
     }
 
     Ok(WinAnalytics {
@@ -151,14 +189,18 @@ pub fn analyze_games(conn: &mut SqliteConnection, games: &Vec<Game>, player_code
     })
 }
 
-pub fn establish_connection() -> Result<SqliteConnection> {
-    dotenv().ok();
+pub fn get_game_player_code(conn: &mut SqliteConnection, find_id: i32) -> Result<String> {
+    use crate::schema::gamePlayer::dsl::*;
 
-    let database_url = database_url()?;
-
-    SqliteConnection::establish(&database_url)
-        .map_err(|e| anyhow!("Error connecting to {}", database_url))
+    gamePlayer.filter(id.eq(find_id)).select(code).first::<String>(conn).map_err(|e| anyhow!(e.to_string()))
 }
+
+pub fn get_character(conn: &mut SqliteConnection, find_id: i32) -> Result<i32> {
+    use crate::schema::gamePlayer::dsl::*;
+
+    gamePlayer.filter(id.eq(find_id)).select(character).first::<i32>(conn).map_err(|e| anyhow!(e.to_string()))
+}
+
 
 pub fn post_player(conn: &mut SqliteConnection, slippi_player: &SlippiPlayer) -> Result<Player> {
     use crate::schema::player;
@@ -282,12 +324,6 @@ pub fn insert_or_get_game_player(conn: &mut SqliteConnection, new_game_player: &
     }
 }
 
-pub fn get_game_player_code(conn: &mut SqliteConnection, id: i32) -> Result<String> {
-    use crate::schema::gamePlayer::dsl::*;
-
-    gamePlayer.filter(id.eq(id)).select(code).first::<String>(conn).map_err(|e| anyhow!(e.to_string()))
-}
-
 pub fn is_games_empty(conn: &mut SqliteConnection) -> Result<bool> {
 
     use crate::schema::game::dsl::*;
@@ -310,6 +346,15 @@ pub fn prompt_user(prompt: &str, newline: bool) -> Result<String> {
     io::stdin().read_line(&mut response)?;
     let response = response.trim_end().to_owned();
     Ok(response)
+}
+
+pub fn establish_connection() -> Result<SqliteConnection> {
+    dotenv().ok();
+
+    let database_url = database_url()?;
+
+    SqliteConnection::establish(&database_url)
+        .map_err(|e| anyhow!("Error connecting to {}", database_url))
 }
 
 pub fn database_url() -> Result<String> {
