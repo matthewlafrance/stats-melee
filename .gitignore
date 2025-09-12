@@ -1,5 +1,2 @@
 /target
-/test_slps
 .env
-stats_melee.db
-clear_tables.sh
