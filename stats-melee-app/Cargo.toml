@@ -30,6 +30,11 @@ egui_extras = "0.29"
 rfd = "0.14"          # system file/folder picker dialogs
 directories = "5"     # OS-appropriate config + data dirs (ProjectDirs)
 
+# Decoding character/stage icon PNGs for the replay library + viewer.
+# Default features pull in every codec; we only ship PNG icons, so trim
+# to just that. Already in the lockfile transitively via egui_extras.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Settings persistence.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

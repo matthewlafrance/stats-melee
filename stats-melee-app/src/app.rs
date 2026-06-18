@@ -224,6 +224,11 @@ pub struct StatsMeleeApp {
     /// the cached MP4 on success, `Err(message)` on failure. Cleared
     /// when the user navigates to a different replay.
     last_render_summary: Option<Result<PathBuf, String>>,
+
+    /// Lazily-populated GPU-texture cache for character + stage icons,
+    /// with a drawn-badge fallback when no PNG asset is present. See
+    /// [`crate::icons`].
+    icons: crate::icons::IconCache,
 }
 
 /// One message off the summary-worker channel. We flatten the Result into a
@@ -262,7 +267,8 @@ impl SummaryKey {
 }
 
 impl StatsMeleeApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
         let config = AppConfig::load();
         // If onboarding is needed, default to Settings so the first thing
         // the user sees is the "pick replay folder" widget.
@@ -342,6 +348,7 @@ impl StatsMeleeApp {
             render_in_flight_hash: None,
             render_status: None,
             last_render_summary: None,
+            icons: crate::icons::IconCache::default(),
         }
     }
 
@@ -969,6 +976,16 @@ impl StatsMeleeApp {
 
         let user_code = self.config.user_player_code.trim().to_string();
 
+        // Split disjoint field borrows up front: the table body closure
+        // reads `rows` immutably while mutating the `icons` texture cache
+        // (lazy-loads on first sight of each id). Borrowing through two
+        // named locals — rather than `self.rows` / `self.icons` inside the
+        // closure — keeps the borrow checker happy and lets the
+        // post-table `self.set_sort(...)` / `self.open_viewer(...)` calls
+        // reborrow `self` once these end.
+        let rows = &self.rows;
+        let icons = &mut self.icons;
+
         // Collect header clicks from inside the closure via a local —
         // egui header closures can't capture &mut self directly, and
         // calling self.set_sort immediately would double-borrow
@@ -1078,7 +1095,7 @@ impl StatsMeleeApp {
                     // (0..visible.len()); `visible[i]` maps back to
                     // the underlying row in `self.rows`.
                     let idx = visible[row.index()];
-                    let r = &self.rows[idx];
+                    let r = &rows[idx];
 
                     row.col(|ui| {
                         ui.label(r.game_id.to_string());
@@ -1096,16 +1113,20 @@ impl StatsMeleeApp {
                         }
                     });
 
-                    row.col(|ui| render_slot_cell(ui, r.slots[0].as_ref(), &user_code));
+                    row.col(|ui| render_slot_cell(ui, icons, r.slots[0].as_ref(), &user_code));
                     row.col(|ui| {
                         // "Loser" cell picks the next populated non-winner
                         // slot — for 1v1 that's always slot 1, for FFA it's
                         // best-effort (we just show 2nd place).
-                        render_slot_cell(ui, r.slots[1].as_ref(), &user_code);
+                        render_slot_cell(ui, icons, r.slots[1].as_ref(), &user_code);
                     });
 
                     row.col(|ui| {
-                        ui.label(r.stage_name());
+                        ui.horizontal(|ui| {
+                            crate::icons::stage_icon(ui, icons, r.stage_id, 18.0);
+                            ui.add_space(5.0);
+                            ui.label(r.stage_name());
+                        });
                     });
 
                     row.col(|ui| {
@@ -2455,19 +2476,81 @@ fn sortable_header(
 
 /// Render one player-slot cell. Highlights the user's own code in accent
 /// color so it pops in long lists.
-fn render_slot_cell(ui: &mut egui::Ui, slot: Option<&crate::replay_list::PlayerSlot>, user_code: &str) {
+fn render_slot_cell(
+    ui: &mut egui::Ui,
+    icons: &mut crate::icons::IconCache,
+    slot: Option<&crate::replay_list::PlayerSlot>,
+    user_code: &str,
+) {
     match slot {
         None => {
             ui.label("–");
         }
         Some(s) => {
-            let is_me = !user_code.is_empty() && s.code == user_code;
-            let text = format!("{} ({})", s.code, s.character_name());
-            if is_me {
-                ui.colored_label(egui::Color32::from_rgb(100, 170, 255), text);
-            } else {
-                ui.label(text);
-            }
+            ui.horizontal(|ui| {
+                crate::icons::character_icon(ui, icons, s.character_id, 18.0);
+                ui.add_space(5.0);
+                let is_me = !user_code.is_empty() && s.code == user_code;
+                let text = format!("{} ({})", s.code, s.character_name());
+                if is_me {
+                    ui.colored_label(egui::Color32::from_rgb(100, 170, 255), text);
+                } else {
+                    ui.label(text);
+                }
+            });
         }
     }
+}
+
+/// Apply the app-wide visual theme: a roomier dark style with a warm
+/// accent, a clear type scale, and consistently rounded widgets. Called
+/// once at startup from [`StatsMeleeApp::new`].
+fn apply_theme(ctx: &egui::Context) {
+    use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
+
+    let mut style = (*ctx.style()).clone();
+
+    // Roomier than egui's defaults — the dense table benefits from a bit
+    // more breathing room around controls.
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.menu_margin = egui::Margin::same(8.0);
+    style.spacing.interact_size.y = 26.0;
+
+    // Type scale with a clear heading hierarchy.
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+    ]
+    .into();
+
+    // Dark visuals with a warm Melee-ish orange accent.
+    let mut v = egui::Visuals::dark();
+    let accent = Color32::from_rgb(0xE8, 0x6A, 0x33);
+    v.panel_fill = Color32::from_rgb(0x1B, 0x1D, 0x23);
+    v.window_fill = Color32::from_rgb(0x22, 0x25, 0x2C);
+    v.extreme_bg_color = Color32::from_rgb(0x14, 0x16, 0x1A);
+    v.faint_bg_color = Color32::from_rgb(0x26, 0x29, 0x31); // striped table rows
+    v.hyperlink_color = accent;
+    v.selection.bg_fill = accent.linear_multiply(0.45);
+    v.selection.stroke = Stroke::new(1.0, accent);
+
+    let rounding = Rounding::same(5.0);
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.rounding = rounding;
+    }
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent.linear_multiply(0.6));
+    v.window_rounding = Rounding::same(8.0);
+
+    style.visuals = v;
+    ctx.set_style(style);
 }

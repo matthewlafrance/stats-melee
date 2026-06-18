@@ -3631,6 +3631,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "image",
  "rfd",
  "serde",
  "stats-melee",

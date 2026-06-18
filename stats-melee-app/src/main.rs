@@ -11,6 +11,7 @@ use eframe::egui;
 
 mod app;
 mod config;
+mod icons;
 mod render_worker;
 mod replay_list;
 mod slippi;
@@ -25,8 +26,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("stats-melee")
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([640.0, 480.0]),
+            // Wide enough for the full replay-library row (9 columns +
+            // the sidebar) to fit without horizontal scrolling.
+            .with_inner_size([1480.0, 900.0])
+            .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };
 
