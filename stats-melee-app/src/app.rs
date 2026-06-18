@@ -784,7 +784,7 @@ impl StatsMeleeApp {
         ui.add_space(16.0);
         ui.separator();
         ui.label(
-            egui::RichText::new("v0.1 — skeleton")
+            egui::RichText::new("v0.1")
                 .small()
                 .color(egui::Color32::GRAY),
         );
@@ -2045,10 +2045,11 @@ impl StatsMeleeApp {
                 ui.end_row();
 
                 // Melee ISO + ffmpeg rows — only relevant for the
-                // render-video pipeline. Hidden while Track 10 is
-                // parked. The config fields stay so a user who
-                // already set them keeps their values for when the
-                // feature comes back.
+                // in-house render-video pipeline, which is parked
+                // (RENDER_VIDEO_FEATURE_ENABLED = false) while we ship
+                // the Slippi-launcher production build. The config
+                // fields stay so a user who already set them keeps
+                // their values for when the feature comes back.
                 if RENDER_VIDEO_FEATURE_ENABLED {
                     ui.label("Melee ISO").on_hover_text(
                         "Path to your Super Smash Bros. Melee 1.02 NTSC ISO. \
