@@ -1,0 +1,22 @@
+# Rust build artifacts (root + per-crate target dirs)
+target/
+
+# Local data / secrets
+.env
+*.db
+
+# Large local binaries — kept on disk, not version-controlled.
+# The Melee ISO is required to run renders/tests but is copyrighted
+# and ~1.4 GB; each dev supplies their own copy.
+*.iso
+# Test replay corpus (~800 MB of .slp fixtures). Local-only.
+/test_slps/
+
+# Editor / OS cruft
+.DS_Store
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
+# Preserved history of the former nested stats-melee repo (see README/notes).
+/.stats-melee-git-backup/

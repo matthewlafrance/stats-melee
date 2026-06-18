@@ -1,0 +1,49 @@
+[package]
+name = "stats-melee-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "stats-melee-app"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace-internal: the analytics + DB layer.
+stats-melee = { path = "../stats-melee" }
+
+# GUI stack — 100% Rust, one binary, no webview / no JS runtime.
+# eframe bundles egui + winit + a GL backend (glow). Default features are
+# fine on macOS/Windows/Linux.
+# 0.29+ is required on macOS: earlier versions transitively pin
+# icrate 0.0.4, which emits the wrong type encoding for the NSScreen
+# enumerator and crashes on recent macOS SDKs with
+# `expected return to have type code 'q', but found 'Q'`. 0.29 bumps
+# winit/objc2 past the bug.
+eframe = "0.29"
+egui = "0.29"
+# `datepicker` will be pulled in later when the replay-library date filter
+# lands; for the skeleton we only need the core extras (TableBuilder etc).
+egui_extras = "0.29"
+
+# Native platform goodies.
+rfd = "0.14"          # system file/folder picker dialogs
+directories = "5"     # OS-appropriate config + data dirs (ProjectDirs)
+
+# Settings persistence.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Shared error handling story with the library crate.
+anyhow = "1"
+
+# Needed so the app can name `SqliteConnection` + use the DSL emitted by
+# the macros in `stats_melee::schema` (table!/allow_tables_to_appear...).
+# Version + features kept in sync with stats-melee so Cargo unifies to a
+# single instance.
+diesel = { version = "2.2.0", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+
+[dev-dependencies]
+# Used by render_worker.rs tests for the tempdir-based fixture; the
+# library crate already pulls this in for its own tests.
+tempfile = "3"

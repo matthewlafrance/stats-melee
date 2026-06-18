@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "stats-melee",
+    "stats-melee-app",
+]
+resolver = "2"
+
+# Keep shared profile settings at the workspace root so the CLI and the GUI
+# are compiled with matching codegen options. Individual crates can still
+# override via their own `[profile.*]` sections if necessary.
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,11 @@
+stats-melee/combat.rs
+    trade should just not be considered. sometimes doesn't change state of game but often leads back to neutral. 
+    if both players are off stage, shouldn't count as a "trade". Often it's an edge guard and rarely is it truely neutral.
+
+General Questions
+    in compute_combat_states_1v1, where does the frame data actually come from?
+        seems like its coming from the slippi read directly, so what is the point of our Game struct
+    what is the pipeline from slp file -> our db -> user facing?
+        what is actually saved in the db?
+            we calculate frame analysis on the fly when a viewer is created. would it make sense to save frame data into the db?
+            what is the criteria for "saved in db" vs calculated on the fly?
