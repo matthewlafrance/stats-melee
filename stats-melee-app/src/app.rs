@@ -43,34 +43,27 @@ use crate::viewer::{self, ViewerState};
 ///   changes.
 const RENDER_VIDEO_FEATURE_ENABLED: bool = false;
 
+/// Accent color used for the active nav toggle, the settings gear when
+/// open, and selection highlights. Kept in sync with [`apply_theme`].
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4C, 0x8B, 0xF5);
+
+/// Max width of the centered page content column. Sized to fit the full
+/// replay-library row (~1060 px of columns + spacing) so the table sits
+/// centered rather than hugging the left edge on wide windows.
+const CONTENT_MAX_WIDTH: f32 = 1080.0;
+
 /// Which page is currently displayed in the main panel.
 ///
-/// `ReplayViewer` is intentionally absent from [`Page::all`] — it's
-/// reached by clicking "View" on a library row, not via the sidebar,
-/// and doesn't have its own nav entry.
+/// `ReplayLibrary` and `Analytics` are the two primary views, reached
+/// from the floating toggle at the bottom of the window. `Settings` is
+/// reached from the gear in the top bar. `ReplayViewer` is a drill-down
+/// from the library ("View" on a row) and has no nav entry of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     ReplayLibrary,
     Analytics,
     Settings,
     ReplayViewer,
-}
-
-impl Page {
-    fn label(self) -> &'static str {
-        match self {
-            Page::ReplayLibrary => "Replay library",
-            Page::Analytics => "Analytics",
-            Page::Settings => "Settings",
-            Page::ReplayViewer => "Replay viewer",
-        }
-    }
-
-    /// Pages that appear in the left sidebar. `ReplayViewer` is excluded
-    /// because it's a drill-down from the library, not a top-level nav.
-    fn all() -> [Page; 3] {
-        [Page::ReplayLibrary, Page::Analytics, Page::Settings]
-    }
 }
 
 pub struct StatsMeleeApp {
@@ -765,42 +758,104 @@ impl StatsMeleeApp {
 
     // --- Panels ---------------------------------------------------------------
 
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("stats-melee");
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        for page in Page::all() {
-            let selected = self.page == page;
-            if ui.selectable_label(selected, page.label()).clicked() {
-                if self.page != page {
-                    // Navigating away from Settings mid-confirm should
-                    // reset the confirm state — don't want a stale "are
-                    // you sure?" sitting there when the user comes back.
-                    self.nuke_confirm_pending = false;
-                    // Same for the per-row delete confirm + status
-                    // line on the library page.
-                    self.delete_confirm_game_id = None;
-                    self.last_delete_summary = None;
-                }
-                self.page = page;
-            }
+    /// Switch the active page, resetting any per-page confirm/transient
+    /// state that shouldn't survive navigation.
+    fn navigate_to(&mut self, page: Page) {
+        if self.page == page {
+            return;
         }
+        // A stale "are you sure?" (Settings nuke) or per-row delete
+        // confirm shouldn't linger when the user comes back later.
+        self.nuke_confirm_pending = false;
+        self.delete_confirm_game_id = None;
+        self.last_delete_summary = None;
+        self.page = page;
+    }
 
-        ui.add_space(16.0);
-        ui.separator();
-        ui.label(
-            egui::RichText::new("v0.1")
-                .small()
-                .color(egui::Color32::GRAY),
-        );
+    /// Top bar: wordmark + replay count on the left; search (library
+    /// page only) and the settings gear on the right. Replaces the old
+    /// left sidebar.
+    fn render_top_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("stats-melee").size(18.0).strong());
+                if !self.rows.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("· {} replays", self.rows.len()))
+                            .color(egui::Color32::from_gray(130)),
+                    );
+                }
+
+                // Right-aligned cluster: gear first (right_to_left lays
+                // out from the right edge inward), then the search box.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let on_settings = self.page == Page::Settings;
+                    let gear = egui::Button::new(egui::RichText::new("⚙").size(17.0))
+                        .min_size(egui::vec2(32.0, 28.0))
+                        .fill(if on_settings {
+                            ACCENT
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        });
+                    if ui.add(gear).on_hover_text("Settings").clicked() {
+                        // Gear toggles into Settings, or back out to the
+                        // library if we're already there.
+                        let target = if on_settings {
+                            Page::ReplayLibrary
+                        } else {
+                            Page::Settings
+                        };
+                        self.navigate_to(target);
+                    }
+
+                    if self.page == Page::ReplayLibrary {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.replay_search)
+                                .hint_text("Search code / character / stage / date…")
+                                .desired_width(240.0),
+                        );
+                    }
+                });
+            });
+            ui.add_space(5.0);
+        });
+    }
+
+    /// Floating Library / Analytics toggle anchored to the bottom-center
+    /// of the window. Hidden on the drill-down viewer page, which has its
+    /// own "Back to library" nav.
+    fn render_view_toggle(&mut self, ctx: &egui::Context) {
+        if self.page == Page::ReplayViewer {
+            return;
+        }
+        egui::Area::new(egui::Id::new("view_toggle"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -18.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x14, 0x16, 0x1A))
+                    .stroke(egui::Stroke::new(0.5, egui::Color32::from_gray(64)))
+                    .rounding(egui::Rounding::same(999.0))
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        let mut target = None;
+                        ui.horizontal(|ui| {
+                            if view_pill(ui, self.page, Page::ReplayLibrary, "Library") {
+                                target = Some(Page::ReplayLibrary);
+                            }
+                            if view_pill(ui, self.page, Page::Analytics, "Analytics") {
+                                target = Some(Page::Analytics);
+                            }
+                        });
+                        if let Some(p) = target {
+                            self.navigate_to(p);
+                        }
+                    });
+            });
     }
 
     fn main_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.page.label());
-        ui.add_space(8.0);
-
         match self.page {
             Page::ReplayLibrary => self.page_replay_library(ui),
             Page::Analytics => self.page_analytics(ui),
@@ -880,38 +935,21 @@ impl StatsMeleeApp {
             self.reload_rows();
         }
 
-        // Search bar. Live-filters the rendered rows below — typing
-        // "fox" narrows to games where Fox played (or someone with
-        // "fox" in their code), typing "2026-04" narrows to that
-        // month, etc. See `ReplayRow::matches_search` for the full
-        // field list.
-        ui.horizontal(|ui| {
-            ui.label("🔍");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.replay_search)
-                    .hint_text("Search code / character / stage / date…")
-                    .desired_width(280.0),
+        // The live search box lives in the top bar (bound to the same
+        // `self.replay_search`); `render_replay_table` reads it to filter
+        // rows. When a search is active, show a small "(N of M)" count
+        // here above the table so the user knows the filter is on.
+        let q = self.replay_search.trim();
+        if !q.is_empty() {
+            let total = self.rows.len();
+            let shown = self.rows.iter().filter(|r| r.matches_search(q)).count();
+            ui.label(
+                egui::RichText::new(format!("Showing {shown} of {total} (filtered)"))
+                    .small()
+                    .color(egui::Color32::GRAY),
             );
-            if !self.replay_search.is_empty() && ui.button("Clear").clicked() {
-                self.replay_search.clear();
-            }
-            // "(N of M)" count, computed lazily — only walks rows
-            // when the search is non-empty so the empty-search hot
-            // path is free.
-            let q = self.replay_search.trim();
-            if !q.is_empty() {
-                let total = self.rows.len();
-                let shown = self.rows.iter().filter(|r| r.matches_search(q)).count();
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(format!("({shown} of {total})"))
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
-            }
-        });
-
-        ui.add_space(6.0);
+            ui.add_space(4.0);
+        }
 
         // Inline result line for the most recent per-row delete.
         // Sits between the search row and the table so it's visible
@@ -932,6 +970,10 @@ impl StatsMeleeApp {
         }
 
         self.render_replay_table(ui);
+
+        // Clearance so the last row isn't hidden behind the floating
+        // bottom nav toggle.
+        ui.add_space(64.0);
     }
 
     fn render_replay_table(&mut self, ui: &mut egui::Ui) {
@@ -1338,6 +1380,9 @@ impl StatsMeleeApp {
                     .color(egui::Color32::GRAY),
             );
         }
+
+        // Clearance for the floating bottom nav toggle.
+        ui.add_space(64.0);
     }
 
     /// Kick off a background recompute of the summary for the current
@@ -1616,7 +1661,7 @@ impl StatsMeleeApp {
     }
 
     fn render_player_summary(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         s: &PlayerSummary,
         character_filter: Option<i32>,
@@ -1633,50 +1678,89 @@ impl StatsMeleeApp {
             return;
         }
 
-        ui.heading(format!("Summary — {}", s.code));
-        ui.add_space(4.0);
-
-        egui::Grid::new("summary_grid")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .striped(true)
-            .show(ui, |ui| {
-                row(ui, "Games played", s.games_played.to_string());
-                row(ui, "Avg placement", fmt_opt_f64(s.avg_placement, 2));
-                row(
-                    ui,
-                    "Avg stocks remaining",
-                    fmt_opt_f64(s.avg_stocks_remaining, 2),
+        // Header: the filtered character's icon (when active) next to the
+        // player code + game count.
+        ui.horizontal(|ui| {
+            if let Some(cid) = character_filter {
+                crate::icons::character_icon(ui, &mut self.icons, cid, 36.0);
+                ui.add_space(10.0);
+            }
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(&s.code).size(22.0).strong());
+                ui.label(
+                    egui::RichText::new(format!("{} games played", s.games_played))
+                        .color(egui::Color32::from_gray(140)),
                 );
-                row(
-                    ui,
-                    "Avg stocks taken (1v1)",
-                    fmt_opt_f64(s.avg_stocks_taken, 2),
-                );
-                row(ui, "APM", fmt_opt_f64(s.avg_apm, 1));
-                row(ui, "L-cancel rate", fmt_opt_percent(s.l_cancel_rate));
-                row(
-                    ui,
-                    "Avg punish length (hits)",
-                    fmt_opt_f64(s.avg_punish_length, 2),
-                );
-                row(
-                    ui,
-                    "Openings per kill",
-                    fmt_opt_f64(s.openings_per_kill, 2),
-                );
-                row(
-                    ui,
-                    "Longest win streak",
-                    s.streaks.longest_win.to_string(),
-                );
-                row(
-                    ui,
-                    "Longest loss streak",
-                    s.streaks.longest_loss.to_string(),
-                );
-                row(ui, "Current streak", fmt_current_streak(s.streaks.current));
             });
+        });
+        ui.add_space(14.0);
+
+        // Headline metric cards.
+        ui.horizontal_wrapped(|ui| {
+            metric_card(ui, "Avg placement", &fmt_opt_f64(s.avg_placement, 2));
+            metric_card(ui, "APM", &fmt_opt_f64(s.avg_apm, 0));
+            metric_card(ui, "L-cancel", &fmt_opt_percent(s.l_cancel_rate));
+            metric_card(ui, "Stocks left", &fmt_opt_f64(s.avg_stocks_remaining, 1));
+        });
+        ui.add_space(10.0);
+
+        // Streak banner, tinted green for a win run / red for a loss run.
+        ui.horizontal(|ui| {
+            let (label, color) = match s.streaks.current {
+                c if c > 0 => (
+                    format!("{c}-game win streak"),
+                    egui::Color32::from_rgb(90, 190, 110),
+                ),
+                c if c < 0 => (
+                    format!("{}-game loss streak", -c),
+                    egui::Color32::from_rgb(220, 95, 95),
+                ),
+                _ => (
+                    "No active streak".to_string(),
+                    egui::Color32::from_gray(150),
+                ),
+            };
+            egui::Frame::none()
+                .fill(color.linear_multiply(0.18))
+                .stroke(egui::Stroke::new(1.0, color.linear_multiply(0.7)))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(label).color(color).strong());
+                });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Best: {} W · {} L",
+                    s.streaks.longest_win, s.streaks.longest_loss
+                ))
+                .color(egui::Color32::from_gray(140)),
+            );
+        });
+        ui.add_space(12.0);
+
+        // L-cancel rate as a progress bar for an at-a-glance read.
+        if let Some(rate) = s.l_cancel_rate {
+            ui.label(
+                egui::RichText::new("L-cancel success")
+                    .size(12.0)
+                    .color(egui::Color32::from_gray(150)),
+            );
+            ui.add_space(2.0);
+            ui.add(
+                egui::ProgressBar::new(rate as f32)
+                    .desired_width(320.0)
+                    .text(format!("{:.0}%", rate * 100.0)),
+            );
+            ui.add_space(12.0);
+        }
+
+        // Secondary metrics.
+        ui.horizontal_wrapped(|ui| {
+            metric_card(ui, "Stocks taken (1v1)", &fmt_opt_f64(s.avg_stocks_taken, 2));
+            metric_card(ui, "Punish length", &fmt_opt_f64(s.avg_punish_length, 2));
+            metric_card(ui, "Openings / kill", &fmt_opt_f64(s.openings_per_kill, 2));
+        });
 
         ui.add_space(16.0);
 
@@ -2236,14 +2320,18 @@ impl eframe::App for StatsMeleeApp {
             self.ingest_replays();
         }
 
-        egui::SidePanel::left("nav")
-            .resizable(false)
-            .default_width(200.0)
-            .show(ctx, |ui| {
-                self.sidebar(ui);
-            });
+        self.render_top_bar(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Center a fixed-max-width content column in the (now
+            // sidebar-less) window so the table doesn't hug the left
+            // edge on wide displays. `panel_w` is read before the scroll
+            // area expands its content, so it's the true bounded panel
+            // width — the basis for the symmetric side margin.
+            let panel_w = ui.available_width();
+            let content_w = CONTENT_MAX_WIDTH.min(panel_w);
+            let side = ((panel_w - content_w) * 0.5).max(0.0);
+
             // Wrap the whole page in a both-axis scroll area so content
             // below/right of the viewport stays reachable when the user
             // shrinks the window. Without this, egui just clips whatever
@@ -2252,17 +2340,23 @@ impl eframe::App for StatsMeleeApp {
                 .id_salt("main_panel_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    self.main_panel(ui);
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(side);
+                        ui.allocate_ui(
+                            egui::vec2(content_w, ui.available_height().max(1.0)),
+                            |ui| {
+                                ui.set_width(content_w);
+                                self.main_panel(ui);
+                            },
+                        );
+                    });
                 });
         });
-    }
-}
 
-/// One label + value line in the summary grid.
-fn row(ui: &mut egui::Ui, key: &str, value: impl Into<String>) {
-    ui.label(key);
-    ui.label(value.into());
-    ui.end_row();
+        // Floating nav toggle is drawn last so it layers over the
+        // central panel's content near the bottom edge.
+        self.render_view_toggle(ctx);
+    }
 }
 
 /// Render `Option<f64>` with `decimals` precision, falling back to "—".
@@ -2434,15 +2528,6 @@ fn stage_label(id: Option<i32>) -> String {
     }
 }
 
-/// Human-friendly current-streak label — "+N wins" / "-N losses" / "0".
-fn fmt_current_streak(n: i32) -> String {
-    match n {
-        0 => "0".to_string(),
-        n if n > 0 => format!("+{n} wins"),
-        n => format!("{n} losses"), // n already negative
-    }
-}
-
 /// Render a clickable header label with a sort-indicator arrow when this
 /// column is the active sort. Returns `true` if the header was clicked
 /// this frame.
@@ -2502,7 +2587,49 @@ fn render_slot_cell(
     }
 }
 
-/// Apply the app-wide visual theme: a roomier dark style with a warm
+/// One segment of the floating bottom nav toggle. Returns `true` when
+/// clicked. Active segment is filled with [`ACCENT`]; inactive is a
+/// transparent pill that lights up on hover.
+fn view_pill(ui: &mut egui::Ui, current: Page, target: Page, label: &str) -> bool {
+    let selected = current == target;
+    let text_color = if selected {
+        egui::Color32::from_rgb(10, 20, 40)
+    } else {
+        egui::Color32::from_gray(205)
+    };
+    let btn = egui::Button::new(egui::RichText::new(label).size(13.5).color(text_color))
+        .min_size(egui::vec2(104.0, 30.0))
+        .rounding(egui::Rounding::same(999.0))
+        .fill(if selected {
+            ACCENT
+        } else {
+            egui::Color32::TRANSPARENT
+        });
+    ui.add(btn).clicked()
+}
+
+/// A compact metric card: a small muted label over a large value, on a
+/// raised surface. The building block of the Analytics summary.
+fn metric_card(ui: &mut egui::Ui, label: &str, value: &str) {
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(0x26, 0x29, 0x31))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(16.0, 11.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(116.0);
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(145)),
+                );
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(value).size(23.0).strong());
+            });
+        });
+}
+
+/// Apply the app-wide visual theme: a roomier dark style with a cool
 /// accent, a clear type scale, and consistently rounded widgets. Called
 /// once at startup from [`StatsMeleeApp::new`].
 fn apply_theme(ctx: &egui::Context) {
@@ -2527,9 +2654,9 @@ fn apply_theme(ctx: &egui::Context) {
     ]
     .into();
 
-    // Dark visuals with a warm Melee-ish orange accent.
+    // Dark visuals with a cool blue accent (matches ACCENT).
     let mut v = egui::Visuals::dark();
-    let accent = Color32::from_rgb(0xE8, 0x6A, 0x33);
+    let accent = ACCENT;
     v.panel_fill = Color32::from_rgb(0x1B, 0x1D, 0x23);
     v.window_fill = Color32::from_rgb(0x22, 0x25, 0x2C);
     v.extreme_bg_color = Color32::from_rgb(0x14, 0x16, 0x1A);

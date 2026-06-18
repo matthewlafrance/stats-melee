@@ -12,6 +12,12 @@ target/
 # Test replay corpus (~800 MB of .slp fixtures). Local-only.
 /test_slps/
 
+# Extracted Melee stock-icon / stage art (Nintendo IP). Loaded locally by
+# the app; not committed by default. Remove these two lines if you decide
+# to track the art. See stats-melee-app/assets/README.md.
+stats-melee-app/assets/characters/*.png
+stats-melee-app/assets/stages/*.png
+
 # Editor / OS cruft
 .DS_Store
 

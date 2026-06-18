@@ -145,12 +145,14 @@ fn draw_badge(ui: &mut egui::Ui, size: egui::Vec2, color: egui::Color32, text: &
         return;
     }
     let painter = ui.painter();
-    painter.rect_filled(rect, egui::Rounding::same(4.0), color);
+    let radius = size.x.min(size.y) * 0.5;
+    // Circular disc — reads as an icon rather than a flat colored tag.
+    painter.circle_filled(rect.center(), radius, color);
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(size.y * 0.42),
+        egui::FontId::proportional(size.y * 0.4),
         readable_on(color),
     );
 }
