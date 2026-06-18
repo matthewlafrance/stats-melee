@@ -15,6 +15,7 @@ use stats_melee::analysis_cache::{AnalysisCache, AnalysisCacheConfig};
 use stats_melee::combat::CombatV2Config;
 use stats_melee::gamedata::{CHARACTERS, STAGES};
 use stats_melee::video_cache::{VideoCache, VideoCacheConfig};
+use stats_melee::analytics::{WinAnalytics, WinProportion};
 use stats_melee::{PlayerSummary, PlayerSummaryFilter};
 
 use crate::config::AppConfig;
@@ -109,6 +110,12 @@ pub struct StatsMeleeApp {
     /// it's a handful of DB queries, not frame-cheap. Keyed by `summary_for`
     /// so a Settings code edit *or* a selector change invalidates it.
     summary: Option<PlayerSummary>,
+    /// Career win-rate breakdowns (by played character, opponent-character
+    /// matchup, stage, and opponent code) for the current code. Computed
+    /// in the same worker as `summary` and rendered below the summary
+    /// cards on the Analytics page. Filter-independent — always the full
+    /// career view for the code.
+    win_analytics: Option<WinAnalytics>,
     /// Most recent error from `player_summary_filtered`.
     summary_error: Option<String>,
     /// The (code, character_id, stage_id) tuple the cached `summary` was
@@ -228,7 +235,7 @@ pub struct StatsMeleeApp {
 /// plain enum so the sender side doesn't have to deal with `Send` bounds on
 /// anyhow errors — a `String` round-trips cleanly.
 enum SummaryMsg {
-    Ok(PlayerSummary),
+    Ok(PlayerSummary, WinAnalytics),
     Err(String),
 }
 
@@ -318,6 +325,7 @@ impl StatsMeleeApp {
             ingest_loading: false,
             auto_scan_attempted: false,
             summary: None,
+            win_analytics: None,
             summary_error: None,
             summary_for: None,
             summary_rx: None,
@@ -1398,6 +1406,7 @@ impl StatsMeleeApp {
         let code = self.config.user_player_code.trim().to_string();
         if code.is_empty() {
             self.summary = None;
+            self.win_analytics = None;
             self.summary_error = None;
             self.summary_for = None;
             self.summary_rx = None;
@@ -1428,14 +1437,21 @@ impl StatsMeleeApp {
 
         thread::spawn(move || {
             let msg = match stats_melee::open_database(&db_path) {
-                Ok(mut conn) => match stats_melee::player_summary_filtered(
-                    &mut conn,
-                    &code_for_thread,
-                    &filter_for_thread,
-                ) {
-                    Ok(s) => SummaryMsg::Ok(s),
-                    Err(e) => SummaryMsg::Err(e.to_string()),
-                },
+                Ok(mut conn) => {
+                    // Summary (filter-aware) + career win breakdowns
+                    // (filter-independent) in one worker pass so both
+                    // land on the same frame.
+                    let summary = stats_melee::player_summary_filtered(
+                        &mut conn,
+                        &code_for_thread,
+                        &filter_for_thread,
+                    );
+                    let analytics = stats_melee::win_analytics(&mut conn, &code_for_thread);
+                    match (summary, analytics) {
+                        (Ok(s), Ok(a)) => SummaryMsg::Ok(s, a),
+                        (Err(e), _) | (_, Err(e)) => SummaryMsg::Err(e.to_string()),
+                    }
+                }
                 Err(e) => SummaryMsg::Err(e.to_string()),
             };
             // Best-effort send; if the receiver is gone the user already
@@ -1634,14 +1650,16 @@ impl StatsMeleeApp {
             return;
         };
         match rx.try_recv() {
-            Ok(SummaryMsg::Ok(s)) => {
+            Ok(SummaryMsg::Ok(s, a)) => {
                 self.summary = Some(s);
+                self.win_analytics = Some(a);
                 self.summary_error = None;
                 self.summary_loading = false;
                 self.summary_rx = None;
             }
             Ok(SummaryMsg::Err(e)) => {
                 self.summary = None;
+                self.win_analytics = None;
                 self.summary_error = Some(e);
                 self.summary_loading = false;
                 self.summary_rx = None;
@@ -1764,6 +1782,9 @@ impl StatsMeleeApp {
 
         ui.add_space(16.0);
 
+        // Career win-rate breakdowns (icons + bars).
+        self.render_win_breakdowns(ui);
+
         // Kill-moves section is character-gated. Without a character filter
         // the rolled-up distribution mixes attack ids that mean different
         // moves for different characters (id 23 is Falcon Punch for Falcon
@@ -1822,6 +1843,57 @@ impl StatsMeleeApp {
                 }
             }
         }
+    }
+
+    /// Career win-rate breakdowns under the summary cards: by the
+    /// character the player picked, by opponent-character matchup, by
+    /// stage, and by opponent code. Each is a sorted top-N list of
+    /// icon + name + win-rate bar + record. Filter-independent.
+    fn render_win_breakdowns(&mut self, ui: &mut egui::Ui) {
+        // Disjoint borrows: read the analytics while mutating the icon
+        // texture cache.
+        let Self {
+            win_analytics,
+            icons,
+            ..
+        } = self;
+        let Some(wa) = win_analytics.as_ref() else {
+            return;
+        };
+
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Win-rate breakdowns")
+                .size(16.0)
+                .strong(),
+        );
+        ui.add_space(8.0);
+
+        const TOP_N: usize = 8;
+
+        // Two side-by-side columns of sections so the page stays compact.
+        ui.columns(2, |cols| {
+            char_winrate_section(
+                &mut cols[0],
+                icons,
+                "Your characters",
+                &wa.played_characters,
+                TOP_N,
+            );
+            char_winrate_section(
+                &mut cols[1],
+                icons,
+                "Matchups (vs)",
+                &wa.opp_characters,
+                TOP_N,
+            );
+        });
+        ui.add_space(12.0);
+        ui.columns(2, |cols| {
+            stage_winrate_section(&mut cols[0], icons, "Stages", &wa.stages, TOP_N);
+            opponent_winrate_section(&mut cols[1], "Top opponents", &wa.opponents, TOP_N);
+        });
     }
 
     fn page_replay_viewer(&mut self, ui: &mut egui::Ui) {
@@ -2342,13 +2414,14 @@ impl eframe::App for StatsMeleeApp {
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         ui.add_space(side);
-                        ui.allocate_ui(
-                            egui::vec2(content_w, ui.available_height().max(1.0)),
-                            |ui| {
-                                ui.set_width(content_w);
-                                self.main_panel(ui);
-                            },
-                        );
+                        // Constrain only the *width* and let height flow
+                        // naturally — the replay table virtualizes its
+                        // rows against the available height, so pinning a
+                        // fixed height here collapses it to zero rows.
+                        ui.vertical(|ui| {
+                            ui.set_width(content_w);
+                            self.main_panel(ui);
+                        });
                     });
                 });
         });
@@ -2627,6 +2700,174 @@ fn metric_card(ui: &mut egui::Ui, label: &str, value: &str) {
                 ui.label(egui::RichText::new(value).size(23.0).strong());
             });
         });
+}
+
+/// Lerp two RGB triples in sRGB space.
+fn lerp_rgb(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(l(a.0, b.0), l(a.1, b.1), l(a.2, b.2))
+}
+
+/// Win-rate color ramp: red (low) → amber (even) → green (high).
+fn win_color(p: f32) -> egui::Color32 {
+    if p < 0.5 {
+        lerp_rgb((212, 80, 80), (216, 176, 72), p / 0.5)
+    } else {
+        lerp_rgb((216, 176, 72), (90, 190, 110), (p - 0.5) / 0.5)
+    }
+}
+
+/// Horizontal win-rate bar: a dark track with a colored fill proportional
+/// to `proportion` (0..=1).
+fn draw_win_bar(ui: &mut egui::Ui, proportion: f32, width: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let p = proportion.clamp(0.0, 1.0);
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::Rounding::same(3.0),
+        egui::Color32::from_rgb(0x2A, 0x2D, 0x35),
+    );
+    let fill_w = (width * p).round();
+    if fill_w >= 1.0 {
+        let fill = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, height));
+        painter.rect_filled(fill, egui::Rounding::same(3.0), win_color(p));
+    }
+}
+
+/// One win-rate row: an optional leading icon, a fixed-width name, the
+/// bar, and a "NN%  W-L" record. `draw_icon` lets character/stage rows
+/// show an icon while opponent rows pass a no-op.
+fn winrate_row(
+    ui: &mut egui::Ui,
+    draw_icon: impl FnOnce(&mut egui::Ui),
+    name: &str,
+    wp: &WinProportion,
+) {
+    ui.horizontal(|ui| {
+        draw_icon(ui);
+        ui.add_sized(
+            [104.0, 18.0],
+            egui::Label::new(egui::RichText::new(name).size(13.0)).truncate(),
+        );
+        draw_win_bar(ui, wp.proportion, 84.0, 11.0);
+        ui.add_space(6.0);
+        let losses = wp.total - wp.wins;
+        ui.label(
+            egui::RichText::new(format!("{:.0}%  {}-{}", wp.proportion * 100.0, wp.wins, losses))
+                .size(12.0)
+                .color(egui::Color32::from_gray(165)),
+        );
+    });
+}
+
+/// Header for a win-rate section, followed by the top-`top_n` rows (by
+/// games played) of a per-character [`WinProportion`] array, each led by
+/// the character icon. `arr` is indexed by internal character id.
+fn char_winrate_section(
+    ui: &mut egui::Ui,
+    icons: &mut crate::icons::IconCache,
+    title: &str,
+    arr: &[WinProportion],
+    top_n: usize,
+) {
+    ui.label(egui::RichText::new(title).strong());
+    ui.add_space(4.0);
+    let mut rows: Vec<(usize, &WinProportion)> = arr
+        .iter()
+        .enumerate()
+        .filter(|(_, wp)| wp.total > 0)
+        .collect();
+    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("(no data)")
+                .italics()
+                .color(egui::Color32::from_gray(120)),
+        );
+        return;
+    }
+    for (id, wp) in rows.into_iter().take(top_n) {
+        let name = CHARACTERS.get(id).copied().unwrap_or("Unknown");
+        winrate_row(
+            ui,
+            |ui| {
+                crate::icons::character_icon(ui, icons, id as i32, 18.0);
+                ui.add_space(5.0);
+            },
+            name,
+            wp,
+        );
+    }
+}
+
+/// Same as [`char_winrate_section`] but for the per-stage array, led by
+/// the stage icon.
+fn stage_winrate_section(
+    ui: &mut egui::Ui,
+    icons: &mut crate::icons::IconCache,
+    title: &str,
+    arr: &[WinProportion],
+    top_n: usize,
+) {
+    ui.label(egui::RichText::new(title).strong());
+    ui.add_space(4.0);
+    let mut rows: Vec<(usize, &WinProportion)> = arr
+        .iter()
+        .enumerate()
+        .filter(|(_, wp)| wp.total > 0)
+        .collect();
+    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("(no data)")
+                .italics()
+                .color(egui::Color32::from_gray(120)),
+        );
+        return;
+    }
+    for (id, wp) in rows.into_iter().take(top_n) {
+        let name = STAGES.get(id).copied().unwrap_or("Unknown");
+        winrate_row(
+            ui,
+            |ui| {
+                crate::icons::stage_icon(ui, icons, id as i32, 18.0);
+                ui.add_space(5.0);
+            },
+            name,
+            wp,
+        );
+    }
+}
+
+/// Win-rate-by-opponent-code section. No icons — opponents are keyed by
+/// connect code.
+fn opponent_winrate_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    map: &std::collections::HashMap<String, WinProportion>,
+    top_n: usize,
+) {
+    ui.label(egui::RichText::new(title).strong());
+    ui.add_space(4.0);
+    let mut rows: Vec<(&String, &WinProportion)> =
+        map.iter().filter(|(_, wp)| wp.total > 0).collect();
+    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("(no data)")
+                .italics()
+                .color(egui::Color32::from_gray(120)),
+        );
+        return;
+    }
+    for (code, wp) in rows.into_iter().take(top_n) {
+        winrate_row(ui, |_ui| {}, code, wp);
+    }
 }
 
 /// Apply the app-wide visual theme: a roomier dark style with a cool

@@ -358,6 +358,16 @@ pub fn analyze_games(conn: &mut SqliteConnection, games: &Vec<Game>, player_code
     })
 }
 
+/// Convenience: fetch every game `code` appeared in and roll it up into a
+/// [`WinAnalytics`] (win rates by played character, opponent-character
+/// matchup, stage, and opponent code). Thin wrapper over
+/// [`filter_games`] + [`analyze_games`] for callers that just want the
+/// breakdown for one player.
+pub fn win_analytics(conn: &mut SqliteConnection, code: &str) -> Result<WinAnalytics> {
+    let games = filter_games(conn, code)?;
+    analyze_games(conn, &games, code)
+}
+
 pub fn get_game_player_code(conn: &mut SqliteConnection, find_id: i32) -> Result<String> {
     use crate::schema::gamePlayer::dsl::*;
 
