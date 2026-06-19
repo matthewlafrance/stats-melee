@@ -5,6 +5,7 @@ use serde_json::{map, value};
 use soccer::{Display, Into, TryFrom};
 use std::string;
 
+use crate::advanced::{compute_advanced_stats_1v1, AdvancedStats};
 use crate::punish::{extract_punishes_1v1, RawPunish};
 
 pub static STAGES: [&str; 33] = [
@@ -126,6 +127,39 @@ pub fn attack_display_name(id: i32) -> String {
     }
 }
 
+/// Turn a CamelCase identifier from [`CHARACTERS`] / [`STAGES`] into a
+/// space-separated display string: `"CaptainFalcon"` → `"Captain Falcon"`,
+/// `"FountainOfDreams"` → `"Fountain Of Dreams"`, `"GameAndWatch"` →
+/// `"Game And Watch"`.
+///
+/// A space is inserted before an uppercase letter when the previous
+/// character is lowercase or a digit (the usual camelCase boundary), or
+/// when the previous character is uppercase but the *next* is lowercase
+/// (so an acronym run like the leading caps of `"HTMLParser"` splits as
+/// `"HTML Parser"`). This keeps trailing roman numerals together —
+/// `"MushroomKingdomII"` → `"Mushroom Kingdom II"`, not `"… I I"` — and
+/// leaves digit suffixes attached: `"DreamLandN64"` → `"Dream Land N64"`.
+pub fn spaced_name(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            let prev = chars[i - 1];
+            let next_is_lower = chars
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_lowercase());
+            if prev.is_ascii_lowercase()
+                || prev.is_ascii_digit()
+                || (prev.is_ascii_uppercase() && next_is_lower)
+            {
+                out.push(' ');
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub static CHARACTERS: [&str; 33] = [
     "Mario",
     "Fox",
@@ -188,8 +222,17 @@ pub struct GameData {
     /// peppi `port_idx`, not by placement — the `post_game` layer is
     /// responsible for translating indices to `gamePlayer.id`s.
     pub punishes: Vec<RawPunish>,
+    /// Advanced per-game combat stats keyed by peppi port index (see
+    /// `crate::advanced`). `None` for non-1v1 games or when frame data was
+    /// too sparse to analyze. The `post_game` layer maps the port-keyed
+    /// `p1`/`p2` onto each placement's `game_player_stat` row.
+    pub advanced: Option<AdvancedStats>,
     pub stage: i32,
     pub time: i32,
+    /// ISO-8601 timestamp the game was played, read from the Slippi
+    /// metadata `startAt` (e.g. "2025-04-01T14:39:10Z"). `None` when the
+    /// metadata block lacks a usable string date.
+    pub started_at: Option<String>,
 }
 
 /// Read the final-frame stocks value for `port_idx` (0-based) out of peppi's
@@ -333,10 +376,22 @@ impl GameData {
         let stage = game.start.stage as i32;
         let time = Self::game_len(game)?;
 
+        // When the game was played, from the Slippi metadata `startAt`
+        // (a string ISO-8601 timestamp). Best-effort: a missing/non-string
+        // value just yields `None`.
+        let started_at = match metadata.get("startAt") {
+            Some(value::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+
         // Punish extraction is 1v1-only today. For 2v2 / FFA, the extractor
         // returns `Err` which we swallow — those replays still get ingested,
         // just without any punish rows.
         let punishes = extract_punishes_1v1(game).unwrap_or_default();
+
+        // Advanced combat stats, same 1v1-only best-effort contract: a non-1v1
+        // game or sparse frame data yields `None` and the rows store NULLs.
+        let advanced = compute_advanced_stats_1v1(game).ok();
 
         Ok(GameData {
             placements,
@@ -346,8 +401,10 @@ impl GameData {
             l_cancel_attempts,
             l_cancel_success,
             punishes,
+            advanced,
             stage,
             time,
+            started_at,
         })
     }
 
@@ -542,6 +599,27 @@ mod tests {
         // so the UI never has to special-case unknowns at the call site.
         assert_eq!(attack_display_name(23), "attack #23");
         assert_eq!(attack_display_name(-7), "attack #-7");
+    }
+
+    #[test]
+    fn spaced_name_splits_camelcase_roster_names() {
+        // Plain single words are unchanged.
+        assert_eq!(spaced_name("Fox"), "Fox");
+        assert_eq!(spaced_name("Battlefield"), "Battlefield");
+        assert_eq!(spaced_name("Mewtwo"), "Mewtwo");
+        // camelCase boundaries get a space.
+        assert_eq!(spaced_name("CaptainFalcon"), "Captain Falcon");
+        assert_eq!(spaced_name("DonkeyKong"), "Donkey Kong");
+        assert_eq!(spaced_name("GameAndWatch"), "Game And Watch");
+        assert_eq!(spaced_name("FountainOfDreams"), "Fountain Of Dreams");
+        assert_eq!(spaced_name("FinalDestination"), "Final Destination");
+        assert_eq!(spaced_name("YoungLink"), "Young Link");
+        // Trailing roman numerals stay together (no "I I").
+        assert_eq!(spaced_name("MushroomKingdomII"), "Mushroom Kingdom II");
+        assert_eq!(spaced_name("MushroomKingdomI"), "Mushroom Kingdom I");
+        // Digit suffixes stay attached to their word.
+        assert_eq!(spaced_name("DreamLandN64"), "Dream Land N64");
+        assert_eq!(spaced_name("KongoJungleN64"), "Kongo Jungle N64");
     }
 }
 

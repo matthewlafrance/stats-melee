@@ -2,6 +2,7 @@ pub mod dtm;
 pub mod gamedata;
 pub mod melee_boot_nav;
 pub mod slp_to_dtm;
+pub mod advanced;
 pub mod analytics;
 pub mod analysis_cache;
 pub mod combat;
@@ -25,6 +26,7 @@ use self::models::{
 use self::analytics::{WinProportion, WinAnalytics};
 use anyhow::{anyhow, Result};
 use diesel::prelude::*;
+use diesel::connection::SimpleConnection;
 use diesel::dsl;
 use diesel_migrations::MigrationHarness;
 use dotenvy::dotenv;
@@ -120,33 +122,48 @@ pub fn parse_replay_analysis<P: AsRef<Path>>(
 /// not already represented in the database.
 ///
 /// Dedup strategy: each game row carries a `replay_path` and that column has
-/// a UNIQUE index, so we do a cheap "is this path already ingested?" SELECT
-/// before parsing and rely on the index as the ultimate guard. This replaces
-/// the earlier mtime heuristic, which skipped older directories entirely
-/// when the user repointed the app at a folder of older replays.
+/// a UNIQUE index. We load every already-ingested canonical path once, up
+/// front, and skip those files before parsing; the UNIQUE index is the
+/// ultimate guard against a genuinely concurrent double-scan.
 ///
-/// `db_path` used to gate the mtime comparison; it's now accepted for API
-/// compatibility but ignored. Callers can pass any path — typically the
-/// actual DB file.
+/// ## Parallelism
+///
+/// The per-file cost is dominated by CPU-bound, independent work — the peppi
+/// parse, punish extraction (a full frame walk), and the SHA-256 of the
+/// file's bytes. Only the DB inserts must be serialized (SQLite has a single
+/// writer), and they're cheap next to the parse. So we fan the parse + hash
+/// out across a worker pool sized to the machine's parallelism and feed the
+/// results back over a bounded channel to a single inserter running on this
+/// thread. The channel bound caps in-flight memory and lets the insert phase
+/// overlap with parsing.
+///
+/// Insertion order follows parse *completion*, not directory order, so the
+/// `game.id`s assigned within a single scan are not deterministic. Nothing
+/// downstream relies on that (rows are surfaced by `ingested_at` then id);
+/// it's noted only so a future reader isn't surprised.
+///
+/// `db_path` used to gate an mtime comparison; it's now accepted for API
+/// compatibility but ignored. Callers can pass any path.
 pub fn parse_new_replays<P: AsRef<Path>, Q: AsRef<Path>>(
     conn: &mut SqliteConnection,
     root: P,
     _db_path: Q,
 ) -> Result<usize> {
     use crate::schema::game::dsl as game_dsl;
+    use std::collections::HashSet;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::sync_channel;
 
-    let dir = fs::read_dir(root.as_ref())?;
-
-    let mut gamecount: usize = 0;
-
-    for sub_dir in dir {
-        let sub_dir = sub_dir?;
-        let sub_dir_path = sub_dir.path();
-
+    // 1. Collect candidate `.slp` paths: `root/<subdir>/*.slp`, skipping the
+    //    non-replay directories the old walk skipped.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for sub_dir in fs::read_dir(root.as_ref())? {
+        let sub_dir_path = sub_dir?.path();
         if !sub_dir_path.is_dir() {
             continue;
         }
-
         if let Some(name) = sub_dir_path.file_name() {
             if name == "target"
                 || name == "src"
@@ -157,99 +174,128 @@ pub fn parse_new_replays<P: AsRef<Path>, Q: AsRef<Path>>(
                 continue;
             }
         }
-
         for replay in fs::read_dir(&sub_dir_path)? {
-            let replay = replay?;
-            let replay_path = replay.path();
-
-            // Only look at .slp files (directory may contain thumbnails, etc.)
-            if replay_path.extension().and_then(|e| e.to_str()) != Some("slp") {
-                continue;
+            let p = replay?.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("slp") {
+                candidates.push(p);
             }
-
-            // Canonicalize so two different relative-path spellings of the
-            // same file collapse to a single row. Fall back to the original
-            // path if canonicalize fails (network FS quirks, permissions).
-            let canonical = fs::canonicalize(&replay_path).unwrap_or_else(|_| replay_path.clone());
-            let canonical_str = canonical.to_string_lossy().to_string();
-
-            // Fast path: skip files already in the DB without re-parsing.
-            // The UNIQUE index on `game.replay_path` is the ultimate guard,
-            // but parsing peppi is expensive enough that a 1-query exists
-            // check pays for itself on every re-scan.
-            let already_ingested: bool = diesel::select(dsl::exists(
-                game_dsl::game.filter(game_dsl::replay_path.eq(&canonical_str)),
-            ))
-            .get_result(conn)
-            .unwrap_or(false);
-            if already_ingested {
-                continue;
-            }
-
-            // Real-world .slp files in the wild occasionally tickle
-            // panics in peppi (truncated headers, unexpected events,
-            // etc.). Without catch_unwind a single bad file takes
-            // eframe's process down with it — and any games ingested
-            // earlier in the loop are still committed because diesel
-            // on SQLite auto-commits each post_game call. Catch here,
-            // log the offending filename, and keep going.
-            use std::panic::{catch_unwind, AssertUnwindSafe};
-
-            let parsed = catch_unwind(AssertUnwindSafe(|| parse_single_replay(&replay_path)));
-            let gamedata = match parsed {
-                Ok(Ok(g)) => g,
-                Ok(Err(e)) => {
-                    eprintln!(
-                        "stats-melee: skipping {}: parse error: {e}",
-                        replay_path.display()
-                    );
-                    continue;
-                }
-                Err(_panic) => {
-                    eprintln!(
-                        "stats-melee: skipping {}: parser panicked",
-                        replay_path.display()
-                    );
-                    continue;
-                }
-            };
-
-            // SHA-256 the file's bytes for the analysis sidecar cache
-            // (Track 11). Hashing failure is non-fatal — we just store
-            // None and the viewer falls back to the slow re-parse-from-
-            // disk path for that row, which is a UX regression but not
-            // a correctness issue.
-            let content_hash = match hash_slp_file(&replay_path) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    eprintln!(
-                        "stats-melee: hashing {} failed: {e} (continuing without cache key)",
-                        replay_path.display()
-                    );
-                    None
-                }
-            };
-
-            // Errors here can be diesel UNIQUE-constraint violations (a
-            // genuinely concurrent double-scan) or other schema issues.
-            // Either way, log + continue rather than abort the scan.
-            if let Err(e) = post_game_full(
-                conn,
-                &gamedata,
-                Some(&canonical_str),
-                content_hash.as_deref(),
-            ) {
-                eprintln!(
-                    "stats-melee: skipping {}: insert error: {e}",
-                    replay_path.display()
-                );
-                continue;
-            }
-            gamecount += 1;
         }
     }
 
-    Ok(gamecount)
+    // 2. Load every already-ingested canonical path once, so dedup is an
+    //    in-memory O(1) lookup instead of a SELECT per file.
+    let existing: HashSet<String> = game_dsl::game
+        .select(game_dsl::replay_path)
+        .filter(game_dsl::replay_path.is_not_null())
+        .load::<Option<String>>(conn)
+        .map_err(|e| anyhow!(e.to_string()))?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // 3. Canonicalize + drop already-ingested files. Canonicalizing collapses
+    //    two spellings of the same path (matches the UNIQUE index); fall back
+    //    to the original path if it fails (network FS quirks, permissions).
+    let new_paths: Vec<(PathBuf, String)> = candidates
+        .into_iter()
+        .filter_map(|p| {
+            let canonical = fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            let canonical_str = canonical.to_string_lossy().to_string();
+            if existing.contains(&canonical_str) {
+                None
+            } else {
+                Some((p, canonical_str))
+            }
+        })
+        .collect();
+
+    if new_paths.is_empty() {
+        return Ok(0);
+    }
+
+    // 4. Parse + hash in parallel; insert serially on this thread.
+    let total = new_paths.len();
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(total)
+        .max(1);
+    // Shared cursor the workers claim files from (work-stealing, so a few
+    // slow files don't stall a whole static chunk).
+    let next = AtomicUsize::new(0);
+    // Bounded so parsing can't outrun the inserter into unbounded memory.
+    let (tx, rx) =
+        sync_channel::<(GameData, String, Option<String>)>(n_workers.saturating_mul(4).max(8));
+
+    let count = std::thread::scope(|scope| {
+        for _ in 0..n_workers {
+            let tx = tx.clone();
+            let next = &next;
+            let new_paths = &new_paths;
+            scope.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= total {
+                    break;
+                }
+                let (path, canonical) = &new_paths[i];
+
+                // Real-world .slp files occasionally tickle panics in peppi
+                // (truncated headers, unexpected events). catch_unwind keeps
+                // one bad file from taking the whole scan (and the app
+                // process) down; log and move on.
+                let parsed = catch_unwind(AssertUnwindSafe(|| parse_single_replay(path)));
+                let gamedata = match parsed {
+                    Ok(Ok(g)) => g,
+                    Ok(Err(e)) => {
+                        eprintln!("stats-melee: skipping {}: parse error: {e}", path.display());
+                        continue;
+                    }
+                    Err(_panic) => {
+                        eprintln!("stats-melee: skipping {}: parser panicked", path.display());
+                        continue;
+                    }
+                };
+
+                // SHA-256 for the analysis sidecar cache key. A failure here
+                // is non-fatal — we store None and the viewer falls back to a
+                // re-parse for that row.
+                let content_hash = match hash_slp_file(path) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        eprintln!(
+                            "stats-melee: hashing {} failed: {e} (continuing without cache key)",
+                            path.display()
+                        );
+                        None
+                    }
+                };
+
+                // If the inserter has gone away the receiver is dropped; stop.
+                if tx.send((gamedata, canonical.clone(), content_hash)).is_err() {
+                    break;
+                }
+            });
+        }
+        // Drop our own sender so `rx` ends once every worker's clone is gone.
+        drop(tx);
+
+        // Insert as results stream in. Errors here can be UNIQUE-constraint
+        // violations (a concurrent double-scan) or other schema issues —
+        // log + skip rather than abort the whole scan.
+        let mut count: usize = 0;
+        for (gamedata, canonical, content_hash) in rx {
+            if let Err(e) =
+                post_game_full(conn, &gamedata, Some(&canonical), content_hash.as_deref())
+            {
+                eprintln!("stats-melee: skipping {canonical}: insert error: {e}");
+                continue;
+            }
+            count += 1;
+        }
+        count
+    });
+
+    Ok(count)
 }
 
 pub fn filter_games(conn: &mut SqliteConnection, code: &str) -> Result<Vec<Game>> {
@@ -368,6 +414,78 @@ pub fn win_analytics(conn: &mut SqliteConnection, code: &str) -> Result<WinAnaly
     analyze_games(conn, &games, code)
 }
 
+/// Per-stage win/loss split for the games where `code` played
+/// `character_id`. Each entry is `(stage_id, WinProportion)`; sorted by
+/// games played descending. Powers the Analytics "By stage" cross-breakdown
+/// shown when a character is selected with no stage.
+///
+/// A "win" is `game_player_stat.placement == 0` (first place / the 1v1
+/// winner), the same definition [`player_summary_filtered`] uses.
+pub fn win_by_stage_for_character(
+    conn: &mut SqliteConnection,
+    code: &str,
+    character_id: i32,
+) -> Result<Vec<(i32, WinProportion)>> {
+    use crate::schema::{game, gamePlayer, game_player_stat};
+
+    let rows: Vec<(i32, i32)> = gamePlayer::table
+        .inner_join(game_player_stat::table.on(game_player_stat::game_player_id.eq(gamePlayer::id)))
+        .inner_join(game::table.on(game::id.eq(game_player_stat::game_id)))
+        .filter(gamePlayer::code.eq(code))
+        .filter(gamePlayer::character.eq(character_id))
+        .select((game::stage, game_player_stat::placement))
+        .load(conn)
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    Ok(group_win_proportions(rows))
+}
+
+/// Per-character win/loss split for the games `code` played on `stage_id`.
+/// Each entry is `(character_id, WinProportion)`; sorted by games played
+/// descending. Powers the Analytics "By character" cross-breakdown shown
+/// when a stage is selected with no character.
+pub fn win_by_character_for_stage(
+    conn: &mut SqliteConnection,
+    code: &str,
+    stage_id: i32,
+) -> Result<Vec<(i32, WinProportion)>> {
+    use crate::schema::{game, gamePlayer, game_player_stat};
+
+    let rows: Vec<(i32, i32)> = gamePlayer::table
+        .inner_join(game_player_stat::table.on(game_player_stat::game_player_id.eq(gamePlayer::id)))
+        .inner_join(game::table.on(game::id.eq(game_player_stat::game_id)))
+        .filter(gamePlayer::code.eq(code))
+        .filter(game::stage.eq(stage_id))
+        .select((gamePlayer::character, game_player_stat::placement))
+        .load(conn)
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    Ok(group_win_proportions(rows))
+}
+
+/// Fold `(group_id, placement)` rows into per-group [`WinProportion`]s,
+/// sorted by games played (descending). Shared by the two cross-breakdown
+/// queries above; `placement == 0` counts as a win.
+fn group_win_proportions(rows: Vec<(i32, i32)>) -> Vec<(i32, WinProportion)> {
+    let mut map: HashMap<i32, WinProportion> = HashMap::new();
+    for (group, placement) in rows {
+        let wp = map.entry(group).or_insert_with(WinProportion::new_winproportion);
+        if placement == 0 {
+            wp.wins += 1;
+        }
+        wp.total += 1;
+    }
+    let mut out: Vec<(i32, WinProportion)> = map
+        .into_iter()
+        .map(|(g, mut wp)| {
+            wp.update_proportion();
+            (g, wp)
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    out
+}
+
 pub fn get_game_player_code(conn: &mut SqliteConnection, find_id: i32) -> Result<String> {
     use crate::schema::gamePlayer::dsl::*;
 
@@ -460,6 +578,7 @@ pub fn post_game_full(
         time: gamedata.time(),
         replay_path,
         content_hash,
+        started_at: gamedata.started_at.as_deref(),
     };
 
     let inserted_game: Game = diesel::insert_into(game::table)
@@ -474,6 +593,22 @@ pub fn post_game_full(
     let mut gp_by_port: [Option<i32>; 4] = [None, None, None, None];
     for (placement_idx, gp_id) in player_ids.iter().enumerate() {
         if let Some(id) = gp_id {
+            // Advanced stats are keyed by peppi port; map this placement's
+            // player onto the matching `p1`/`p2` counters. `None` for non-1v1
+            // games (no advanced analysis) stores NULLs across the board.
+            let adv = gamedata.placements[placement_idx].as_ref().and_then(|player| {
+                let port_idx: i32 = player.port.into();
+                let port_idx = usize::try_from(port_idx).ok()?;
+                gamedata.advanced.as_ref().and_then(|a| {
+                    if a.p1_port_idx == port_idx {
+                        Some(a.p1)
+                    } else if a.p2_port_idx == port_idx {
+                        Some(a.p2)
+                    } else {
+                        None
+                    }
+                })
+            });
             let stat = NewGamePlayerStat {
                 game_id: inserted_game.id,
                 game_player_id: *id,
@@ -483,6 +618,16 @@ pub fn post_game_full(
                 inputs: gamedata.inputs[placement_idx],
                 l_cancel_attempts: gamedata.l_cancel_attempts[placement_idx],
                 l_cancel_success: gamedata.l_cancel_success[placement_idx],
+                damage_dealt: adv.map(|a| a.damage_dealt),
+                openings: adv.map(|a| a.openings),
+                neutral_wins: adv.map(|a| a.neutral_wins),
+                adv_frames: adv.map(|a| a.adv_frames),
+                edgeguard_attempts: adv.map(|a| a.edgeguard_attempts),
+                edgeguard_kills: adv.map(|a| a.edgeguard_kills),
+                first_blood: adv.map(|a| i32::from(a.first_blood)),
+                deaths: adv.map(|a| a.deaths),
+                death_percent_sum: adv.map(|a| a.death_percent_sum),
+                comeback_win: adv.map(|a| i32::from(a.comeback_win)),
             };
             post_game_player_stat(conn, &stat)?;
 
@@ -567,7 +712,7 @@ pub fn get_stats_for_game(
 /// Used by [`player_summary_filtered`] and the `_filtered` variant of
 /// each per-code aggregate. The Analytics page selectors translate
 /// directly into one of these structs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlayerSummaryFilter {
     /// `gamePlayer.character` value to require, or `None` for any.
     /// Index into [`gamedata::CHARACTERS`].
@@ -575,15 +720,25 @@ pub struct PlayerSummaryFilter {
     /// `game.stage` value to require, or `None` for any.
     /// Index into [`gamedata::STAGES`].
     pub stage_id: Option<i32>,
+    /// Restrict every aggregate to this explicit set of `game.id`s, or
+    /// `None` for no restriction. This is how the GUI threads its full
+    /// multi-dimensional library filter (opponent character, outcome, date
+    /// ranges, opponent tag — none of which this struct models directly)
+    /// into the per-code aggregates: the GUI computes the matching game-id
+    /// set in-memory and hands it down, so the stats reflect exactly the
+    /// games the library is showing. Combined with `character_id`/`stage_id`
+    /// via AND when all are set.
+    pub game_ids: Option<Vec<i32>>,
 }
 
 impl PlayerSummaryFilter {
-    /// No filter (matches any character on any stage). Equivalent to
-    /// [`PlayerSummaryFilter::default()`] but lets callers write a
+    /// No filter (matches any character on any stage, any game). Equivalent
+    /// to [`PlayerSummaryFilter::default()`] but lets callers write a
     /// `const`-friendly literal at the call site.
     pub const NONE: Self = Self {
         character_id: None,
         stage_id: None,
+        game_ids: None,
     };
 }
 
@@ -625,6 +780,9 @@ pub fn avg_placement_filtered(
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
     }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
+    }
     let placements: Vec<i32> = q
         .select(game_player_stat::placement)
         .load(conn)
@@ -665,6 +823,9 @@ pub fn avg_stocks_remaining_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let stocks: Vec<Option<i32>> = q
         .select(game_player_stat::stocks_remaining)
@@ -708,6 +869,9 @@ pub fn avg_apm_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let rows: Vec<(Option<i32>, i32)> = q
         .select((game_player_stat::inputs, game::time))
@@ -758,6 +922,9 @@ pub fn l_cancel_rate_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let rows: Vec<(Option<i32>, Option<i32>)> = q
         .select((
@@ -819,6 +986,9 @@ pub fn avg_stocks_taken_filtered(
     if let Some(sid) = filter.stage_id {
         id_q = id_q.filter(game::stage.eq(sid));
     }
+    if let Some(ids) = &filter.game_ids {
+        id_q = id_q.filter(game::id.eq_any(ids.clone()));
+    }
     let game_ids: Vec<i32> = id_q
         .select(game_player_stat::game_id)
         .load(conn)
@@ -873,6 +1043,86 @@ pub fn avg_stocks_taken_filtered(
     }
 }
 
+/// Total stocks `player_code` took from opponents and lost to them across the
+/// filtered 1v1 games, as `(taken, lost)`.
+///
+/// Same two-step shape as [`avg_stocks_taken_filtered`] — filters pick the
+/// player's own games, then both sides of each 1v1 are pulled so we can read
+/// the opponent's stocks (taken) alongside the player's own (lost). Stocks are
+/// `starting_stocks - stocks_remaining`, matching the per-game stocks-taken
+/// metric. Games missing stock data, or non-1v1s, are skipped on both totals.
+pub fn total_stocks_filtered(
+    conn: &mut SqliteConnection,
+    player_code: &str,
+    filter: &PlayerSummaryFilter,
+) -> Result<(i64, i64)> {
+    use crate::schema::{game, gamePlayer, game_player_stat};
+
+    let mut id_q = gamePlayer::table
+        .inner_join(game_player_stat::table.on(game_player_stat::game_player_id.eq(gamePlayer::id)))
+        .inner_join(game::table.on(game::id.eq(game_player_stat::game_id)))
+        .filter(gamePlayer::code.eq(player_code))
+        .into_boxed();
+    if let Some(cid) = filter.character_id {
+        id_q = id_q.filter(gamePlayer::character.eq(cid));
+    }
+    if let Some(sid) = filter.stage_id {
+        id_q = id_q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        id_q = id_q.filter(game::id.eq_any(ids.clone()));
+    }
+    let game_ids: Vec<i32> = id_q
+        .select(game_player_stat::game_id)
+        .load(conn)
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    if game_ids.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let rows: Vec<(i32, String, Option<i32>, Option<i32>)> = gamePlayer::table
+        .inner_join(game_player_stat::table.on(game_player_stat::game_player_id.eq(gamePlayer::id)))
+        .filter(game_player_stat::game_id.eq_any(&game_ids))
+        .select((
+            game_player_stat::game_id,
+            gamePlayer::code,
+            game_player_stat::starting_stocks,
+            game_player_stat::stocks_remaining,
+        ))
+        .load(conn)
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    let mut by_game: HashMap<i32, Vec<(String, Option<i32>, Option<i32>)>> = HashMap::new();
+    for (gid, code, starting, remaining) in rows {
+        by_game
+            .entry(gid)
+            .or_default()
+            .push((code, starting, remaining));
+    }
+
+    let mut taken_sum: i64 = 0;
+    let mut lost_sum: i64 = 0;
+    for (_gid, group) in by_game {
+        if group.len() != 2 {
+            continue; // only 1v1s contribute
+        }
+        let stocks_dropped = |row: Option<&(String, Option<i32>, Option<i32>)>| -> Option<i64> {
+            let (_, starting, remaining) = row?;
+            let (start, rem) = (starting.as_ref()?, remaining.as_ref()?);
+            Some((*start - *rem).max(0) as i64)
+        };
+        let opp = group.iter().find(|(code, _, _)| code != player_code);
+        let me = group.iter().find(|(code, _, _)| code == player_code);
+        if let (Some(taken), Some(lost)) = (stocks_dropped(opp), stocks_dropped(me)) {
+            taken_sum += taken;
+            lost_sum += lost;
+        }
+    }
+
+    Ok((taken_sum, lost_sum))
+}
+
 /// Average hit count per punish for `player_code` (as the attacker) — i.e.
 /// how long is a typical combo once they open someone up?
 ///
@@ -902,6 +1152,9 @@ pub fn avg_punish_length_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let hit_counts: Vec<i32> = q
         .select(punish::hit_count)
@@ -944,6 +1197,9 @@ pub fn openings_per_kill_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let did_kill_flags: Vec<i32> = q
         .select(punish::did_kill)
@@ -996,6 +1252,9 @@ pub fn most_common_kill_moves_filtered(
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
     }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
+    }
     let rows: Vec<Option<i32>> = q
         .select(punish::kill_move)
         .load(conn)
@@ -1042,6 +1301,12 @@ pub struct PlayerSummary {
     pub code: String,
     /// Total games the player appeared in (rows in `game_player_stat`).
     pub games_played: i32,
+    /// Total time played across those games, in seconds (sum of `game.time`).
+    /// Pairs with `games_played` for a career playtime read-out.
+    pub total_seconds: i64,
+    /// Games won (placement == 0 — first place / the 1v1 winner). Pairs
+    /// with `games_played` for a win-rate: `wins as f64 / games_played`.
+    pub wins: i32,
     /// 0-indexed average placement — 0.0 means "always first", 3.0 means
     /// "always last in a 4-player game". `None` if the player has no rows.
     pub avg_placement: Option<f64>,
@@ -1050,6 +1315,10 @@ pub struct PlayerSummary {
     /// Average stocks taken from the opponent in 1v1 games (None if the
     /// player has no 1v1 data).
     pub avg_stocks_taken: Option<f64>,
+    /// Total stocks taken from opponents across all filtered 1v1 games.
+    pub total_stocks_taken: i64,
+    /// Total stocks lost to opponents across all filtered 1v1 games.
+    pub total_stocks_lost: i64,
     /// Actions per minute across all games.
     pub avg_apm: Option<f64>,
     /// L-cancel success rate in `[0.0, 1.0]`. `None` when the player has
@@ -1066,11 +1335,26 @@ pub struct PlayerSummary {
     /// Most common kill moves as `(attack_id, count)` pairs, sorted by count
     /// descending. Truncated to [`PlayerSummary::TOP_KILL_MOVES_CAP`].
     pub top_kill_moves: Vec<(i32, i32)>,
+    /// Aggregate advanced-stat ratios (damage/opening, edge-guard %,
+    /// first-blood win %, comeback rate, average death %) over the same
+    /// filtered game set. See [`AdvancedAggregate`].
+    pub advanced: AdvancedAggregate,
 }
 
 impl PlayerSummary {
     /// How many kill-move rows `player_summary` keeps in `top_kill_moves`.
     pub const TOP_KILL_MOVES_CAP: usize = 5;
+
+    /// Win rate in `[0.0, 1.0]` (`wins / games_played`), or `None` when no
+    /// games match. For a filtered summary this is the win rate on exactly
+    /// that character/stage combination.
+    pub fn win_rate(&self) -> Option<f64> {
+        if self.games_played > 0 {
+            Some(self.wins as f64 / self.games_played as f64)
+        } else {
+            None
+        }
+    }
 }
 
 /// Build a [`PlayerSummary`] for `player_code` by calling each per-code
@@ -1097,6 +1381,124 @@ pub fn player_summary(
     player_code: &str,
 ) -> Result<PlayerSummary> {
     player_summary_filtered(conn, player_code, &PlayerSummaryFilter::NONE)
+}
+
+/// Aggregate advanced-stat ratios over the filtered games — the numbers the
+/// Analytics page surfaces from the per-game [`crate::advanced`] counters.
+/// Each is `None` when its denominator is zero (no qualifying games yet, or
+/// legacy / non-1v1 rows that stored NULLs).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AdvancedAggregate {
+    /// `sum(damage_dealt) / sum(openings)` — average % per conversion.
+    pub avg_damage_per_opening: Option<f64>,
+    /// `sum(edgeguard_kills) / sum(edgeguard_attempts)` in `[0,1]`.
+    pub edgeguard_success: Option<f64>,
+    /// Of games where the player took the first stock, the fraction won.
+    pub first_blood_win_rate: Option<f64>,
+    /// Of games won, the fraction won after trailing by >= 2 stocks.
+    pub comeback_rate: Option<f64>,
+    /// `sum(death_percent_sum) / sum(deaths)` — average % the player dies at.
+    pub avg_death_percent: Option<f64>,
+}
+
+/// Fold the per-game advanced counters into [`AdvancedAggregate`] in one
+/// query. Mirrors the boxed-query filter pattern of the other `*_filtered`
+/// aggregates (character / stage / explicit game-id set).
+pub fn advanced_aggregate_filtered(
+    conn: &mut SqliteConnection,
+    player_code: &str,
+    filter: &PlayerSummaryFilter,
+) -> Result<AdvancedAggregate> {
+    use crate::schema::{game, gamePlayer, game_player_stat};
+
+    let mut q = gamePlayer::table
+        .inner_join(game_player_stat::table.on(game_player_stat::game_player_id.eq(gamePlayer::id)))
+        .inner_join(game::table.on(game::id.eq(game_player_stat::game_id)))
+        .filter(gamePlayer::code.eq(player_code))
+        .into_boxed();
+    if let Some(cid) = filter.character_id {
+        q = q.filter(gamePlayer::character.eq(cid));
+    }
+    if let Some(sid) = filter.stage_id {
+        q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
+    }
+
+    type Row = (
+        i32,         // placement
+        Option<f64>, // damage_dealt
+        Option<i32>, // openings
+        Option<i32>, // edgeguard_kills
+        Option<i32>, // edgeguard_attempts
+        Option<i32>, // first_blood
+        Option<i32>, // deaths
+        Option<f64>, // death_percent_sum
+        Option<i32>, // comeback_win
+    );
+    let rows: Vec<Row> = q
+        .select((
+            game_player_stat::placement,
+            game_player_stat::damage_dealt,
+            game_player_stat::openings,
+            game_player_stat::edgeguard_kills,
+            game_player_stat::edgeguard_attempts,
+            game_player_stat::first_blood,
+            game_player_stat::deaths,
+            game_player_stat::death_percent_sum,
+            game_player_stat::comeback_win,
+        ))
+        .load(conn)
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    let (mut dmg, mut openings) = (0.0_f64, 0_i64);
+    let (mut eg_kills, mut eg_attempts) = (0_i64, 0_i64);
+    let (mut fb_games, mut fb_wins) = (0_i64, 0_i64);
+    let (mut wins, mut comebacks) = (0_i64, 0_i64);
+    let (mut death_sum, mut deaths) = (0.0_f64, 0_i64);
+
+    for (placement, damage, opn, egk, ega, first_blood, d, dps, comeback) in rows {
+        if let (Some(dm), Some(o)) = (damage, opn) {
+            if o > 0 {
+                dmg += dm;
+                openings += o as i64;
+            }
+        }
+        if let (Some(k), Some(a)) = (egk, ega) {
+            if a > 0 {
+                eg_kills += k as i64;
+                eg_attempts += a as i64;
+            }
+        }
+        if first_blood == Some(1) {
+            fb_games += 1;
+            if placement == 0 {
+                fb_wins += 1;
+            }
+        }
+        if placement == 0 {
+            wins += 1;
+            if comeback == Some(1) {
+                comebacks += 1;
+            }
+        }
+        if let (Some(dc), Some(s)) = (d, dps) {
+            if dc > 0 {
+                deaths += dc as i64;
+                death_sum += s;
+            }
+        }
+    }
+
+    let ratio = |num: i64, den: i64| (den > 0).then(|| num as f64 / den as f64);
+    Ok(AdvancedAggregate {
+        avg_damage_per_opening: (openings > 0).then(|| dmg / openings as f64),
+        edgeguard_success: ratio(eg_kills, eg_attempts),
+        first_blood_win_rate: ratio(fb_wins, fb_games),
+        comeback_rate: ratio(comebacks, wins),
+        avg_death_percent: (deaths > 0).then(|| death_sum / deaths as f64),
+    })
 }
 
 /// Filterable variant of [`player_summary`].
@@ -1128,36 +1530,53 @@ pub fn player_summary_filtered(
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
     }
-    let placements: Vec<i32> = q
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
+    }
+    // Pull placement + match duration in one pass: placements feed
+    // games_played / wins / streaks, and the durations sum to total playtime.
+    let rows: Vec<(i32, i32)> = q
         .order(game_player_stat::game_id.asc())
-        .select(game_player_stat::placement)
+        .select((game_player_stat::placement, game::time))
         .load(conn)
         .map_err(|e| anyhow!(e.to_string()))?;
+    let placements: Vec<i32> = rows.iter().map(|(p, _)| *p).collect();
+    let total_seconds: i64 = rows.iter().map(|(_, t)| (*t).max(0) as i64).sum();
     let games_played = placements.len() as i32;
+    // placement == 0 is a win (first place / the 1v1 winner).
+    let wins = placements.iter().filter(|&&p| p == 0).count() as i32;
     let streaks = streaks_from_placements(&placements);
 
     let avg_placement = avg_placement_filtered(conn, player_code, filter)?;
     let avg_stocks_remaining_val = avg_stocks_remaining_filtered(conn, player_code, filter)?;
     let avg_stocks_taken = avg_stocks_taken_filtered(conn, player_code, filter)?;
+    let (total_stocks_taken, total_stocks_lost) =
+        total_stocks_filtered(conn, player_code, filter)?;
     let avg_apm = avg_apm_filtered(conn, player_code, filter)?;
     let l_cancel_rate = l_cancel_rate_filtered(conn, player_code, filter)?;
     let avg_punish_length = avg_punish_length_filtered(conn, player_code, filter)?;
     let openings_per_kill = openings_per_kill_filtered(conn, player_code, filter)?;
     let mut top_kill_moves = most_common_kill_moves_filtered(conn, player_code, filter)?;
     top_kill_moves.truncate(PlayerSummary::TOP_KILL_MOVES_CAP);
+    let advanced = advanced_aggregate_filtered(conn, player_code, filter)?;
 
     Ok(PlayerSummary {
         code: player_code.to_string(),
         games_played,
+        total_seconds,
+        wins,
         avg_placement,
         avg_stocks_remaining: avg_stocks_remaining_val,
         avg_stocks_taken,
+        total_stocks_taken,
+        total_stocks_lost,
         avg_apm,
         l_cancel_rate,
         avg_punish_length,
         openings_per_kill,
         streaks,
         top_kill_moves,
+        advanced,
     })
 }
 
@@ -1206,6 +1625,9 @@ pub fn streaks_filtered(
     }
     if let Some(sid) = filter.stage_id {
         q = q.filter(game::stage.eq(sid));
+    }
+    if let Some(ids) = &filter.game_ids {
+        q = q.filter(game::id.eq_any(ids.clone()));
     }
     let placements: Vec<i32> = q
         .order(game_player_stat::game_id.asc())
@@ -1435,6 +1857,29 @@ pub fn open_database<P: AsRef<Path>>(path: P) -> Result<SqliteConnection> {
     let mut conn = SqliteConnection::establish(url)
         .map_err(|e| anyhow!("opening {}: {e}", url))?;
 
+    // Concurrency hardening. The GUI keeps several connections open against
+    // the same file at once — the UI thread plus the ingest and summary
+    // workers, which each open their own handle (SqliteConnection is
+    // !Send). Under SQLite's default rollback journal a writer takes an
+    // exclusive lock that blocks every reader, so an in-flight scan made
+    // the Library/Analytics reads fail outright with "database is locked".
+    //
+    //   - journal_mode = WAL: readers see the last committed snapshot and
+    //     no longer block on an active writer (the common case here).
+    //   - busy_timeout: when two writers *do* contend (e.g. a delete during
+    //     a scan), wait up to 5 s for the lock instead of erroring at once.
+    //   - synchronous = NORMAL: the safe pairing with WAL; fewer fsyncs.
+    //
+    // WAL is a persistent property of the file, so setting it on any open
+    // sticks for all connections; busy_timeout is per-connection, hence set
+    // on every open.
+    conn.batch_execute(
+        "PRAGMA busy_timeout = 5000; \
+         PRAGMA journal_mode = WAL; \
+         PRAGMA synchronous = NORMAL;",
+    )
+    .map_err(|e| anyhow!("configuring sqlite at {}: {e}", url))?;
+
     conn.run_pending_migrations(MIGRATIONS)
         .map_err(|e| anyhow!("running migrations at {}: {e}", url))?;
 
@@ -1564,3 +2009,39 @@ mod streak_tests {
     }
 }
 
+
+#[cfg(test)]
+mod cross_breakdown_tests {
+    use super::*;
+
+    #[test]
+    fn group_win_proportions_counts_and_sorts() {
+        // (group_id, placement) rows. placement 0 = win.
+        // group 1: 3 games, 2 wins. group 2: 5 games, 1 win.
+        let rows = vec![
+            (1, 0),
+            (1, 0),
+            (1, 1),
+            (2, 1),
+            (2, 0),
+            (2, 1),
+            (2, 1),
+            (2, 1),
+        ];
+        let out = group_win_proportions(rows);
+        // Sorted by total descending → group 2 (5) before group 1 (3).
+        assert_eq!(out[0].0, 2);
+        assert_eq!(out[0].1.wins, 1);
+        assert_eq!(out[0].1.total, 5);
+        assert!((out[0].1.proportion - 0.2).abs() < 1e-6);
+
+        assert_eq!(out[1].0, 1);
+        assert_eq!(out[1].1.wins, 2);
+        assert_eq!(out[1].1.total, 3);
+    }
+
+    #[test]
+    fn group_win_proportions_empty_input() {
+        assert!(group_win_proportions(Vec::new()).is_empty());
+    }
+}

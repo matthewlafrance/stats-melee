@@ -27,8 +27,8 @@ use eframe::egui;
 
 use stats_melee::analysis_cache::AnalysisCache;
 use stats_melee::combat::{CombatState, ReplayAnalysis};
-use stats_melee::gamedata::{CHARACTERS, STAGES};
-use stats_melee::models::{Game, GamePlayer};
+use stats_melee::gamedata::{spaced_name, CHARACTERS, STAGES};
+use stats_melee::models::{Game, GamePlayer, GamePlayerStat, Punish};
 
 /// One player in the viewer's metadata header. Ordered by placement in
 /// [`ViewerState::players`] (slot 0 = 1st place, 1 = 2nd, ...).
@@ -40,6 +40,51 @@ pub struct ViewerPlayer {
     pub character_id: i32,
     /// Peppi port index (0..=3).
     pub port: i32,
+    /// `gamePlayer.id` for this slot — the join key against `punish`
+    /// (`attacker_id`) and `game_player_stat` (`game_player_id`) rows when
+    /// building [`PlayerGameStats`].
+    pub gp_id: i32,
+}
+
+/// Per-player, single-game stat roll-up shown on the viewer page. Derived
+/// from this game's `punish` + `game_player_stat` rows — no .slp re-parse
+/// needed, so it's available even when the combat-state analysis failed.
+/// Aligned 1:1 with [`ViewerState::players`].
+#[derive(Debug, Clone, Default)]
+pub struct PlayerGameStats {
+    /// Stocks this player took (punishes by them that killed).
+    pub kills: i32,
+    /// Self-destructs: stocks this player lost that the opponent wasn't
+    /// credited for (walk-offs, failed recoveries with no last hit, etc.).
+    /// `None` when stock data for the game is missing. Computed as
+    /// `deaths − stocks the opponent killed`.
+    pub self_destructs: Option<i32>,
+    /// Distinct punishes (combos / openings) this player landed.
+    pub combos: i32,
+    /// Hits in their longest single punish this game.
+    pub longest_combo: i32,
+    /// Mean hits per punish. `None` when they landed no punishes.
+    pub avg_combo: Option<f64>,
+    /// Punishes landed per kill — lower is better. `None` with zero kills.
+    pub openings_per_kill: Option<f64>,
+    /// Stocks left at game end (from `game_player_stat`).
+    pub stocks_remaining: Option<i32>,
+    /// L-cancel success rate in `[0,1]`. `None` when no aerials landed.
+    pub l_cancel: Option<f64>,
+    /// Actions per minute over this game's duration.
+    pub apm: Option<f64>,
+    // --- Advanced per-match metrics (DB `game_player_stat` columns) --------
+    /// Average percent dealt per opening (`damage_dealt / openings`).
+    pub damage_per_opening: Option<f64>,
+    /// Share of neutral exchanges this player won, vs the opponent
+    /// (`my_neutral_wins / (mine + theirs)`), in `[0,1]`.
+    pub neutral_win_pct: Option<f64>,
+    /// Share of in-play advantage time this player held (`my_adv_frames /
+    /// (mine + theirs)`), in `[0,1]` — the "stage control" read.
+    pub stage_control_pct: Option<f64>,
+    /// Edge-guard conversion rate (`edgeguard_kills / edgeguard_attempts`),
+    /// in `[0,1]`.
+    pub edgeguard_success: Option<f64>,
 }
 
 impl ViewerPlayer {
@@ -122,6 +167,10 @@ pub struct ViewerState {
     pub stage_id: i32,
     pub duration_seconds: i32,
     pub ingested_at: String,
+    /// ISO-8601 timestamp the game was PLAYED, from the Slippi metadata
+    /// `startAt`. `None` for legacy rows ingested before the column existed
+    /// (re-ingest to populate).
+    pub played_at: Option<String>,
     /// In placement order; may be shorter than 4 for 1v1 / 3-player games.
     pub players: Vec<ViewerPlayer>,
     /// Per-frame analysis. `Err(reason)` when the replay file is missing
@@ -139,6 +188,11 @@ pub struct ViewerState {
     /// `frame` ascending, same order `get_punishes_for_game` returns
     /// rows.
     pub key_moments: Vec<KeyMoment>,
+    /// Per-player single-game stats, aligned 1:1 with `players`. Empty
+    /// only when no player slots were populated. Sourced from the DB
+    /// (`punish` + `game_player_stat`), so it survives a failed .slp
+    /// re-parse the same way the metadata header does.
+    pub player_stats: Vec<PlayerGameStats>,
 }
 
 impl ViewerState {
@@ -210,6 +264,7 @@ pub fn load_viewer(
                 code: gp.code,
                 character_id: gp.character,
                 port: gp.port,
+                gp_id: *gp_id,
             });
         }
     }
@@ -225,8 +280,8 @@ pub fn load_viewer(
     //   3. On a successful re-parse, write back to the cache so the
     //      next viewer-open of this replay is instant.
     let analysis = match g.replay_path.as_deref() {
-        None => Err("this game was ingested before replay-path tracking — \
-                     re-ingest to enable the scrub bar"
+        None => Err("This replay's file location wasn't recorded — \
+                     re-scan your replay folder to enable the timeline."
             .to_string()),
         Some(path) => derive_analysis(path, g.content_hash.as_deref(), cache)
             .map_err(|e| e.to_string()),
@@ -242,22 +297,33 @@ pub fn load_viewer(
         analysis.as_ref().ok(),
     );
 
-    // Build the key-moment list from the punish table. Skipped when
-    // analysis failed (we'd have nothing to overlay them on anyway).
-    // Cheap: one DB query per viewer load + an in-memory map.
+    // Load this game's punishes once. They drive both the scrub-bar
+    // key-moment markers (only when analysis succeeded — they overlay it)
+    // and the per-player game stats (always, since they're DB-sourced and
+    // don't need the .slp). A query hiccup degrades both to "absent"
+    // rather than failing the whole viewer load.
+    let punishes = match stats_melee::get_punishes_for_game(conn, game_id) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("loading punishes for game {game_id}: {e}");
+            Vec::new()
+        }
+    };
+
     let key_moments = match analysis.as_ref() {
-        Ok(a) => match stats_melee::get_punishes_for_game(conn, game_id) {
-            Ok(punishes) => key_moments_from_punishes(&punishes, &gp_id_to_port, a),
-            Err(e) => {
-                // Don't fail the whole viewer load over a punish-query
-                // hiccup; key-moment markers degrade to "absent", the
-                // scrub bar still renders.
-                eprintln!("loading punishes for game {game_id}: {e}");
-                Vec::new()
-            }
-        },
+        Ok(a) => key_moments_from_punishes(&punishes, &gp_id_to_port, a),
         Err(_) => Vec::new(),
     };
+
+    // Per-player single-game stats from punishes + stat rows.
+    let stat_rows = match stats_melee::get_stats_for_game(conn, game_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("loading stat rows for game {game_id}: {e}");
+            Vec::new()
+        }
+    };
+    let player_stats = compute_player_game_stats(&players, &punishes, &stat_rows, g.time);
 
     Ok(ViewerState {
         game_id: g.id,
@@ -265,11 +331,124 @@ pub fn load_viewer(
         stage_id: g.stage,
         duration_seconds: g.time,
         ingested_at: g.ingested_at,
+        played_at: g.started_at,
         players,
         analysis,
         user_perspective,
         key_moments,
+        player_stats,
     })
+}
+
+/// Roll up per-player stats for a single game from its `punish` rows and
+/// `game_player_stat` rows. Pure (no IO) so it's easy to unit-test. The
+/// returned vector is aligned 1:1 with `players`.
+///
+/// In a 1v1 each punish's `attacker_id` is one of the two players'
+/// `gp_id`s, so "kills / combos by player X" is just a filter on
+/// `attacker_id`. APM divides this player's input count by the game's
+/// duration in minutes.
+fn compute_player_game_stats(
+    players: &[ViewerPlayer],
+    punishes: &[Punish],
+    stat_rows: &[GamePlayerStat],
+    duration_seconds: i32,
+) -> Vec<PlayerGameStats> {
+    players
+        .iter()
+        .map(|p| {
+            let mine: Vec<&Punish> =
+                punishes.iter().filter(|pu| pu.attacker_id == p.gp_id).collect();
+            let combos = mine.len() as i32;
+            let kills = mine.iter().filter(|pu| pu.did_kill_bool()).count() as i32;
+            let longest_combo = mine.iter().map(|pu| pu.hit_count).max().unwrap_or(0);
+            let avg_combo = if combos > 0 {
+                let sum: i64 = mine.iter().map(|pu| pu.hit_count as i64).sum();
+                Some(sum as f64 / combos as f64)
+            } else {
+                None
+            };
+            let openings_per_kill = if kills > 0 {
+                Some(combos as f64 / kills as f64)
+            } else {
+                None
+            };
+
+            let stat = stat_rows.iter().find(|s| s.game_player_id == p.gp_id);
+            let stocks_remaining = stat.and_then(|s| s.stocks_remaining);
+
+            // Self-destructs = this player's deaths that the opponent
+            // didn't kill them for. Deaths come from the stock delta;
+            // kills-against come from punishes where this player was the
+            // victim. `None` when stock data is missing (can't count
+            // deaths). Clamped at 0 in case punish/stock data disagree.
+            let self_destructs = match (stat.and_then(|s| s.starting_stocks), stocks_remaining) {
+                (Some(start), Some(remaining)) => {
+                    let deaths = (start - remaining).max(0);
+                    let killed_by_opponent = punishes
+                        .iter()
+                        .filter(|pu| pu.victim_id == p.gp_id && pu.did_kill_bool())
+                        .count() as i32;
+                    Some((deaths - killed_by_opponent).max(0))
+                }
+                _ => None,
+            };
+
+            let l_cancel = stat.and_then(|s| {
+                match (s.l_cancel_attempts, s.l_cancel_success) {
+                    (Some(a), Some(su)) if a > 0 => Some(su as f64 / a as f64),
+                    _ => None,
+                }
+            });
+            let apm = stat.and_then(|s| s.inputs).and_then(|inputs| {
+                if duration_seconds > 0 {
+                    Some(inputs as f64 / (duration_seconds as f64 / 60.0))
+                } else {
+                    None
+                }
+            });
+
+            // Advanced per-match metrics from the stored columns. Neutral-win
+            // and stage-control are shares vs the opponent, so they need the
+            // other player's row (the lone other slot in a 1v1).
+            let opp = stat_rows.iter().find(|s| s.game_player_id != p.gp_id);
+            let damage_per_opening = stat.and_then(|s| match (s.damage_dealt, s.openings) {
+                (Some(d), Some(o)) if o > 0 => Some(d / o as f64),
+                _ => None,
+            });
+            let share = |mine: Option<i32>, theirs: Option<i32>| match (mine, theirs) {
+                (Some(a), Some(b)) if a + b > 0 => Some(a as f64 / (a + b) as f64),
+                _ => None,
+            };
+            let neutral_win_pct = share(
+                stat.and_then(|s| s.neutral_wins),
+                opp.and_then(|s| s.neutral_wins),
+            );
+            let stage_control_pct =
+                share(stat.and_then(|s| s.adv_frames), opp.and_then(|s| s.adv_frames));
+            let edgeguard_success = stat.and_then(|s| match (s.edgeguard_kills, s.edgeguard_attempts)
+            {
+                (Some(k), Some(a)) if a > 0 => Some(k as f64 / a as f64),
+                _ => None,
+            });
+
+            PlayerGameStats {
+                kills,
+                self_destructs,
+                combos,
+                longest_combo,
+                avg_combo,
+                openings_per_kill,
+                stocks_remaining,
+                l_cancel,
+                apm,
+                damage_per_opening,
+                neutral_win_pct,
+                stage_control_pct,
+                edgeguard_success,
+            }
+        })
+        .collect()
 }
 
 /// Build [`KeyMoment`]s from the punish rows for one game. Pure —
@@ -442,15 +621,270 @@ fn user_palette(perspective: Option<UserPerspective>) -> (egui::Color32, egui::C
 /// Playback + embedded video land in Track 10; today this is a static
 /// overview with the scrub bar as a timeline visualization. When video
 /// arrives the scrub bar becomes click-to-seek and gains a playhead.
-pub fn render_viewer(ui: &mut egui::Ui, state: &ViewerState) {
-    render_metadata(ui, state);
+pub fn render_viewer(ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, state: &ViewerState) {
+    render_match_header(ui, icons, state);
     ui.add_space(16.0);
-    ui.separator();
-    ui.add_space(12.0);
+    render_headtohead(ui, state);
+    ui.add_space(18.0);
+    render_combat_timeline(ui, state);
 
+    // Quiet footer: the bookkeeping that used to live in the metadata grid.
+    ui.add_space(14.0);
+    let path = state.replay_path.as_deref().unwrap_or("(no file path recorded)");
+    ui.label(
+        egui::RichText::new(format!("Game #{} · added {} · {}", state.game_id, state.ingested_at, path))
+            .small()
+            .color(egui::Color32::from_gray(120)),
+    );
+}
+
+/// Theme-aware raised-surface fill for the viewer's cards — mirrors the
+/// Analytics/Career card look so the per-match page reads as part of the same
+/// family.
+fn card_fill(_visuals: &egui::Visuals) -> egui::Color32 {
+    // Matches the Melee-palette card surface in app.rs (`BG_CARD`).
+    egui::Color32::from_rgb(0x29, 0x23, 0x3A)
+}
+
+/// The port (lowest of the two) the user sits on, if a perspective is set —
+/// used to tag "you" in the matchup header.
+fn user_port(state: &ViewerState) -> Option<i32> {
+    let lower = state.players.iter().map(|p| p.port).min()?;
+    match state.user_perspective {
+        Some(UserPerspective::P1) => Some(lower),
+        Some(UserPerspective::P2) => state.players.iter().map(|p| p.port).filter(|&p| p != lower).max(),
+        None => None,
+    }
+}
+
+/// Matchup banner: the two players (icon + code + character) with a "vs" in
+/// the middle, a winner badge, and a meta line (stage · duration · date).
+fn render_match_header(ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, state: &ViewerState) {
+    if state.players.is_empty() {
+        ui.heading("Match");
+        ui.label(
+            egui::RichText::new("(no player slots populated)")
+                .italics()
+                .color(egui::Color32::GRAY),
+        );
+        return;
+    }
+
+    let you = user_port(state);
+    let mut draw_player = |ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, p: &ViewerPlayer| {
+        crate::icons::character_icon(ui, icons, p.character_id, 30.0);
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let is_you = you == Some(p.port);
+                let code = egui::RichText::new(&p.code).size(17.0).strong().color(if is_you {
+                    egui::Color32::from_rgb(100, 170, 255)
+                } else {
+                    ui.visuals().text_color()
+                });
+                ui.label(code);
+                if p.placement == 0 {
+                    ui.label(
+                        egui::RichText::new("👑")
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(0xE6, 0xB8, 0x4C)),
+                    )
+                    .on_hover_text("Winner");
+                }
+                if is_you {
+                    ui.label(
+                        egui::RichText::new("you")
+                            .small()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                }
+            });
+            ui.label(
+                egui::RichText::new(spaced_name(p.character_name()))
+                    .color(egui::Color32::from_gray(150)),
+            );
+        });
+    };
+
+    // The matchup row. For 1v1 it's "P0  vs  P1"; for odd player counts we
+    // just lay them out left to right.
+    ui.horizontal(|ui| {
+        if let Some(p0) = state.players.first() {
+            draw_player(ui, icons, p0);
+        }
+        if state.players.len() >= 2 {
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("vs").size(15.0).color(egui::Color32::from_gray(130)));
+            ui.add_space(14.0);
+            draw_player(ui, icons, &state.players[1]);
+        }
+    });
+
+    ui.add_space(8.0);
+    // Meta line: stage icon + name · duration · played date.
+    ui.horizontal(|ui| {
+        crate::icons::stage_icon(ui, icons, state.stage_id, 18.0);
+        ui.add_space(5.0);
+        ui.label(spaced_name(state.stage_name()));
+        let sep = |ui: &mut egui::Ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("·").color(egui::Color32::from_gray(110)));
+            ui.add_space(8.0);
+        };
+        sep(ui);
+        ui.label(state.duration_display());
+        if let Some(played) = &state.played_at {
+            sep(ui);
+            ui.label(
+                egui::RichText::new(played_date_prefix(played)).color(egui::Color32::from_gray(150)),
+            );
+        }
+    });
+}
+
+/// 10-char ISO date prefix of a play timestamp, or the whole string when
+/// shorter.
+fn played_date_prefix(s: &str) -> &str {
+    if s.len() >= 10 {
+        &s[..10]
+    } else {
+        s
+    }
+}
+
+/// Head-to-head per-player comparison card: each stat is a row with the two
+/// players' values flanking a centered label, the better side highlighted.
+/// Replaces the old wide stats grid with a Slippi-results-style read.
+fn render_headtohead(ui: &mut egui::Ui, state: &ViewerState) {
+    // Only a true 1v1 has a meaningful head-to-head. Anything else falls back
+    // to a plain note (the advanced stats are 1v1-only anyway).
+    if state.players.len() != 2 || state.player_stats.len() != state.players.len() {
+        ui.label(
+            egui::RichText::new("Per-player comparison is only available for 1v1 games.")
+                .italics()
+                .color(egui::Color32::GRAY),
+        );
+        return;
+    }
+    let st0 = &state.player_stats[0];
+    let st1 = &state.player_stats[1];
+
+    let fill = card_fill(ui.visuals());
+    egui::Frame::none()
+        .fill(fill)
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width().min(560.0));
+            // Column header: which player is which side.
+            ui.columns(3, |c| {
+                c[0].vertical_centered(|ui| {
+                    ui.label(egui::RichText::new(&state.players[0].code).strong());
+                });
+                c[1].vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Head to head")
+                            .small()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                });
+                c[2].vertical_centered(|ui| {
+                    ui.label(egui::RichText::new(&state.players[1].code).strong());
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(2.0);
+
+            let i = |v: i32| Some(v as f64);
+            let int_fmt = |x: f64| format!("{}", x.round() as i64);
+            let f1 = |x: f64| format!("{x:.1}");
+            let f2 = |x: f64| format!("{x:.2}");
+            let pct = |x: f64| format!("{:.0}%", x * 100.0);
+
+            // (label, p0 value, p1 value, higher_is_better, formatter)
+            h2h_row(ui, "Kills", i(st0.kills), i(st1.kills), true, int_fmt);
+            h2h_row(ui, "Damage / opening", st0.damage_per_opening, st1.damage_per_opening, true, f1);
+            h2h_row(ui, "Neutral win %", st0.neutral_win_pct, st1.neutral_win_pct, true, pct);
+            h2h_row(ui, "Stage control %", st0.stage_control_pct, st1.stage_control_pct, true, pct);
+            h2h_row(ui, "Edge-guard %", st0.edgeguard_success, st1.edgeguard_success, true, pct);
+            h2h_row(ui, "Combos", i(st0.combos), i(st1.combos), true, int_fmt);
+            h2h_row(ui, "Longest combo", i(st0.longest_combo), i(st1.longest_combo), true, int_fmt);
+            h2h_row(ui, "Avg combo", st0.avg_combo, st1.avg_combo, true, f1);
+            h2h_row(ui, "Openings / kill", st0.openings_per_kill, st1.openings_per_kill, false, f2);
+            h2h_row(
+                ui,
+                "Self-destructs",
+                st0.self_destructs.map(|v| v as f64),
+                st1.self_destructs.map(|v| v as f64),
+                false,
+                int_fmt,
+            );
+            h2h_row(
+                ui,
+                "Stocks left",
+                st0.stocks_remaining.map(|v| v as f64),
+                st1.stocks_remaining.map(|v| v as f64),
+                true,
+                int_fmt,
+            );
+            h2h_row(ui, "L-cancel", st0.l_cancel, st1.l_cancel, true, pct);
+            h2h_row(ui, "APM", st0.apm, st1.apm, true, |x| format!("{}", x.round() as i64));
+        });
+}
+
+/// One head-to-head row: `[p0 value]  label  [p1 value]`, with the better
+/// side bolded + accented. `higher_better` flips which side wins; `None`
+/// values render as "—" and never win.
+fn h2h_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    a: Option<f64>,
+    b: Option<f64>,
+    higher_better: bool,
+    fmt: impl Fn(f64) -> String,
+) {
+    let a_better = match (a, b) {
+        (Some(x), Some(y)) if (x - y).abs() > 1e-9 => {
+            Some(if higher_better { x > y } else { x < y })
+        }
+        _ => None,
+    };
+    // Melee gold — matches `ACCENT` in app.rs.
+    let accent = egui::Color32::from_rgb(0xE7, 0xB1, 0x3B);
+    let cell = |val: Option<f64>, win: bool| -> egui::RichText {
+        let txt = val.map(&fmt).unwrap_or_else(|| "—".to_string());
+        let mut rt = egui::RichText::new(txt);
+        if win {
+            rt = rt.strong().color(accent);
+        }
+        rt
+    };
+
+    ui.columns(3, |c| {
+        c[0].vertical_centered(|ui| {
+            ui.label(cell(a, a_better == Some(true)));
+        });
+        c[1].vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(12.5)
+                    .color(egui::Color32::from_gray(150)),
+            );
+        });
+        c[2].vertical_centered(|ui| {
+            ui.label(cell(b, a_better == Some(false)));
+        });
+    });
+}
+
+/// The combat-state timeline section (key-moment markers + colored scrub bar
+/// + legend), unchanged in behavior from before — just extracted so
+/// `render_viewer` reads as a sequence of cards/sections.
+fn render_combat_timeline(ui: &mut egui::Ui, state: &ViewerState) {
     match &state.analysis {
         Ok(analysis) => {
-            ui.strong("Combat state");
+            ui.strong("Combat timeline");
             ui.label(
                 egui::RichText::new(intro_blurb(state.user_perspective))
                     .small()
@@ -471,7 +905,7 @@ pub fn render_viewer(ui: &mut egui::Ui, state: &ViewerState) {
             render_legend(ui, state.user_perspective);
         }
         Err(msg) => {
-            ui.strong("Combat state");
+            ui.strong("Combat timeline");
             ui.add_space(6.0);
             render_scrub_bar_placeholder(ui, 24.0);
             ui.add_space(6.0);
@@ -495,71 +929,6 @@ fn intro_blurb(perspective: Option<UserPerspective>) -> &'static str {
              Set your player code in Settings to flip the palette to \
              your perspective."
         }
-    }
-}
-
-fn render_metadata(ui: &mut egui::Ui, state: &ViewerState) {
-    egui::Grid::new("viewer_metadata_grid")
-        .num_columns(2)
-        .spacing([16.0, 4.0])
-        .striped(true)
-        .show(ui, |ui| {
-            kv(ui, "Game id", state.game_id.to_string());
-            kv(ui, "Stage", state.stage_name().to_string());
-            kv(ui, "Duration", state.duration_display());
-            kv(ui, "Ingested", state.ingested_at.clone());
-            if let Some(path) = &state.replay_path {
-                kv(ui, "Replay path", path.clone());
-            } else {
-                kv(ui, "Replay path", "(not recorded)".to_string());
-            }
-        });
-
-    ui.add_space(12.0);
-    ui.strong("Players");
-    ui.add_space(4.0);
-    if state.players.is_empty() {
-        ui.label(
-            egui::RichText::new("(no player slots populated)")
-                .italics()
-                .color(egui::Color32::GRAY),
-        );
-        return;
-    }
-    egui::Grid::new("viewer_players_grid")
-        .num_columns(4)
-        .spacing([16.0, 4.0])
-        .striped(true)
-        .show(ui, |ui| {
-            ui.strong("Placement");
-            ui.strong("Code");
-            ui.strong("Character");
-            ui.strong("Port");
-            ui.end_row();
-            for p in &state.players {
-                ui.label(ordinal(p.placement));
-                ui.label(&p.code);
-                ui.label(p.character_name());
-                ui.label(format!("P{}", p.port + 1));
-                ui.end_row();
-            }
-        });
-}
-
-fn kv(ui: &mut egui::Ui, key: &str, value: String) {
-    ui.label(key);
-    ui.label(value);
-    ui.end_row();
-}
-
-/// `0 → "1st", 1 → "2nd", ...`. Covers the 0..=3 range we actually hit.
-fn ordinal(placement: usize) -> &'static str {
-    match placement {
-        0 => "1st",
-        1 => "2nd",
-        2 => "3rd",
-        3 => "4th",
-        _ => "?",
     }
 }
 
@@ -874,15 +1243,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ordinal_covers_4_slots() {
-        assert_eq!(ordinal(0), "1st");
-        assert_eq!(ordinal(1), "2nd");
-        assert_eq!(ordinal(2), "3rd");
-        assert_eq!(ordinal(3), "4th");
-        assert_eq!(ordinal(99), "?");
-    }
-
-    #[test]
     fn stage_name_falls_back_to_unknown() {
         let s = ViewerState {
             game_id: 1,
@@ -890,10 +1250,12 @@ mod tests {
             stage_id: 999,
             duration_seconds: 0,
             ingested_at: String::new(),
+            played_at: None,
             players: Vec::new(),
             analysis: Err("no data".to_string()),
             user_perspective: None,
             key_moments: Vec::new(),
+            player_stats: Vec::new(),
         };
         assert_eq!(s.stage_name(), "Unknown");
     }
@@ -906,10 +1268,12 @@ mod tests {
             stage_id: 0,
             duration_seconds: secs,
             ingested_at: String::new(),
+            played_at: None,
             players: Vec::new(),
             analysis: Err("".to_string()),
             user_perspective: None,
             key_moments: Vec::new(),
+            player_stats: Vec::new(),
         };
         assert_eq!(mk(0).duration_display(), "0:00");
         assert_eq!(mk(7).duration_display(), "0:07");
@@ -924,6 +1288,7 @@ mod tests {
             code: "X".into(),
             character_id: 1, // Fox
             port: 0,
+            gp_id: 1,
         };
         assert_eq!(p.character_name(), "Fox");
 
@@ -932,6 +1297,7 @@ mod tests {
             code: "Y".into(),
             character_id: 999,
             port: 1,
+            gp_id: 2,
         };
         assert_eq!(p.character_name(), "Unknown");
     }
@@ -1043,6 +1409,7 @@ mod tests {
             code: code.to_string(),
             character_id: 0,
             port,
+            gp_id: port + 1,
         }
     }
 
@@ -1098,6 +1465,141 @@ mod tests {
             compute_user_perspective(Some("ME#1"), &players, Some(&analysis)),
             None
         );
+    }
+
+    // --- per-game stats ------------------------------------------------
+
+    fn vplayer(code: &str, gp_id: i32) -> ViewerPlayer {
+        ViewerPlayer {
+            placement: 0,
+            code: code.to_string(),
+            character_id: 0,
+            port: 0,
+            gp_id,
+        }
+    }
+
+    fn gps(
+        game_player_id: i32,
+        stocks_remaining: Option<i32>,
+        inputs: Option<i32>,
+        l_cancel_attempts: Option<i32>,
+        l_cancel_success: Option<i32>,
+    ) -> GamePlayerStat {
+        GamePlayerStat {
+            id: 0,
+            game_id: 0,
+            game_player_id,
+            placement: 0,
+            stocks_remaining,
+            starting_stocks: Some(4),
+            inputs,
+            l_cancel_attempts,
+            l_cancel_success,
+            damage_dealt: None,
+            openings: None,
+            neutral_wins: None,
+            adv_frames: None,
+            edgeguard_attempts: None,
+            edgeguard_kills: None,
+            first_blood: None,
+            deaths: None,
+            death_percent_sum: None,
+            comeback_win: None,
+        }
+    }
+
+    /// Minimal punish with an explicit attacker→victim direction, for
+    /// exercising the self-destruct (kills-against) accounting.
+    fn pun(attacker_id: i32, victim_id: i32, did_kill: bool) -> Punish {
+        Punish {
+            id: 0,
+            game_id: 0,
+            attacker_id,
+            victim_id,
+            start_frame: 0,
+            end_frame: 10,
+            hit_count: 1,
+            did_kill: did_kill as i32,
+            kill_move: None,
+        }
+    }
+
+    #[test]
+    fn compute_player_game_stats_rolls_up_punishes_and_stat_rows() {
+        let players = vec![vplayer("ME#1", 10), vplayer("OP#2", 20)];
+        // Player 10: two punishes (hit counts 3 and 5), the second a kill.
+        // Player 20: one non-kill punish (hit count 2).
+        let punishes = vec![
+            punish(10, 0, 30, 3, false, None),
+            punish(10, 100, 160, 5, true, Some(11)),
+            punish(20, 200, 220, 2, false, None),
+        ];
+        // 120 s game; player 10 threw 600 inputs → 300 APM; L-cancel 8/10.
+        let stat_rows = vec![
+            gps(10, Some(2), Some(600), Some(10), Some(8)),
+            gps(20, Some(0), Some(300), Some(4), Some(1)),
+        ];
+
+        let out = compute_player_game_stats(&players, &punishes, &stat_rows, 120);
+        assert_eq!(out.len(), 2);
+
+        let me = &out[0];
+        assert_eq!(me.combos, 2);
+        assert_eq!(me.kills, 1);
+        assert_eq!(me.longest_combo, 5);
+        assert_eq!(me.avg_combo, Some(4.0));
+        assert_eq!(me.openings_per_kill, Some(2.0));
+        assert_eq!(me.stocks_remaining, Some(2));
+        assert_eq!(me.l_cancel, Some(0.8));
+        assert_eq!(me.apm, Some(300.0));
+
+        let opp = &out[1];
+        assert_eq!(opp.combos, 1);
+        assert_eq!(opp.kills, 0);
+        assert_eq!(opp.longest_combo, 2);
+        assert_eq!(opp.avg_combo, Some(2.0));
+        assert_eq!(opp.openings_per_kill, None); // no kills → undefined
+        assert_eq!(opp.stocks_remaining, Some(0));
+        // The `punish()` helper leaves victim_id = 0, so no death here is
+        // credited to an opponent — every stock lost reads as a self-
+        // destruct: 4-2 = 2 for ME, 4-0 = 4 for OP. (The realistic
+        // kill-vs-SD split is exercised in the test below.)
+        assert_eq!(me.self_destructs, Some(2));
+        assert_eq!(opp.self_destructs, Some(4));
+    }
+
+    #[test]
+    fn compute_player_game_stats_self_destructs_subtract_opponent_kills() {
+        let players = vec![vplayer("ME#1", 10), vplayer("OP#2", 20)];
+        // ME (10) died 3 times (4→1); the opponent killed them twice → 1 SD.
+        // OP (20) died 4 times (4→0); ME killed them all 4 times → 0 SDs.
+        let punishes = vec![
+            pun(20, 10, true), // opponent kills ME
+            pun(20, 10, true), // opponent kills ME
+            pun(10, 20, true),
+            pun(10, 20, true),
+            pun(10, 20, true),
+            pun(10, 20, true),
+        ];
+        let stat_rows = vec![gps(10, Some(1), None, None, None), gps(20, Some(0), None, None, None)];
+        let out = compute_player_game_stats(&players, &punishes, &stat_rows, 120);
+        assert_eq!(out[0].self_destructs, Some(1), "ME: 3 deaths − 2 kills");
+        assert_eq!(out[1].self_destructs, Some(0), "OP: 4 deaths − 4 kills");
+    }
+
+    #[test]
+    fn compute_player_game_stats_handles_missing_data() {
+        // A player with no punishes and no stat row gets all-default stats.
+        let players = vec![vplayer("ME#1", 10)];
+        let out = compute_player_game_stats(&players, &[], &[], 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].combos, 0);
+        assert_eq!(out[0].kills, 0);
+        assert_eq!(out[0].longest_combo, 0);
+        assert_eq!(out[0].avg_combo, None);
+        assert_eq!(out[0].apm, None); // zero duration → no APM
+        assert_eq!(out[0].self_destructs, None); // no stock data → unknown
     }
 
     // --- key-moment derivation -----------------------------------------

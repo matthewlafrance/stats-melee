@@ -54,6 +54,11 @@ pub struct ReplayRow {
     /// inserted. Sorting uses string comparison, which is correct because
     /// the format is fixed-width `"YYYY-MM-DD HH:MM:SS"`.
     pub ingested_at: String,
+    /// ISO-8601 timestamp the game was PLAYED, from the Slippi metadata
+    /// `startAt`. `None` for legacy rows ingested before the column
+    /// existed (re-ingest to populate). String-comparable for sort/filter
+    /// because ISO-8601 is lexicographically ordered.
+    pub played_at: Option<String>,
 }
 
 impl ReplayRow {
@@ -73,38 +78,28 @@ impl ReplayRow {
         format!("{minutes}:{seconds:02}")
     }
 
-    /// Substring-match the row against a search query. Empty / blank
-    /// query matches everything (so "search box is empty" doesn't
-    /// filter anything out). Otherwise the match is case-insensitive
-    /// across:
-    /// - every populated slot's connect code
-    /// - every populated slot's character name
-    /// - the stage name
-    /// - the ingested-at timestamp prefix (so "2026-04" finds an
-    ///   April month, "2026-04-15" finds a specific day)
-    ///
-    /// Pure helper — easy to unit-test without spinning up the DB.
-    pub fn matches_search(&self, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
+    /// The played date as `YYYY-MM-DD`, or `None` when not recorded. Both
+    /// `2025-04-01T14:39:10Z` and `2025-04-01 14:39:10` slice to the same
+    /// 10-char prefix.
+    pub fn played_date(&self) -> Option<&str> {
+        self.played_at.as_deref().and_then(|s| {
+            if s.len() >= 10 {
+                Some(&s[..10])
+            } else {
+                None
+            }
+        })
+    }
 
-        for slot in self.slots.iter().flatten() {
-            if slot.code.to_lowercase().contains(&q) {
-                return true;
-            }
-            if slot.character_name().to_lowercase().contains(&q) {
-                return true;
-            }
+    /// The ingested ("date added") date as `YYYY-MM-DD`, sliced from the
+    /// fixed-width `"YYYY-MM-DD HH:MM:SS"` SQLite timestamp. `None` only for
+    /// the (shouldn't-happen) case of a malformed/short timestamp.
+    pub fn ingested_date(&self) -> Option<&str> {
+        if self.ingested_at.len() >= 10 {
+            Some(&self.ingested_at[..10])
+        } else {
+            None
         }
-        if self.stage_name().to_lowercase().contains(&q) {
-            return true;
-        }
-        if self.ingested_at.to_lowercase().contains(&q) {
-            return true;
-        }
-        false
     }
 }
 
@@ -172,6 +167,7 @@ pub fn load_rows(
             duration_seconds: g.time,
             user_won,
             ingested_at: g.ingested_at,
+            played_at: g.started_at,
         });
     }
 
@@ -187,6 +183,9 @@ pub fn load_rows(
 pub enum SortKey {
     /// Default: most recently ingested game at the top.
     IngestedAt,
+    /// By when the game was played (Slippi `startAt`). Rows with no
+    /// recorded play date sink to the bottom regardless of direction.
+    PlayedAt,
     /// Insert order — stable even if the system clock is wrong. Useful
     /// as a tiebreaker and as a fallback when timestamps all collide
     /// (e.g. a single bulk import).
@@ -208,7 +207,9 @@ impl SortKey {
         match self {
             // Most recent first / largest game_id first feels right by
             // default; the alphabetical and numeric columns start small.
-            SortKey::IngestedAt | SortKey::GameId | SortKey::Duration => SortDirection::Desc,
+            SortKey::IngestedAt | SortKey::PlayedAt | SortKey::GameId | SortKey::Duration => {
+                SortDirection::Desc
+            }
             SortKey::Stage | SortKey::Outcome => SortDirection::Asc,
         }
     }
@@ -249,14 +250,29 @@ pub fn sort_rows(rows: &mut [ReplayRow], key: SortKey, dir: SortDirection) {
             };
         }
 
+        if matches!(key, SortKey::PlayedAt) {
+            // Rows with no recorded play date sink to the bottom regardless
+            // of direction (same rationale as the Outcome unknowns).
+            let a_known = a.played_at.is_some();
+            let b_known = b.played_at.is_some();
+            if a_known != b_known {
+                return if a_known { Ordering::Less } else { Ordering::Greater };
+            }
+            let ord = a.played_at.cmp(&b.played_at);
+            return match dir {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            };
+        }
+
         let ord = match key {
             SortKey::IngestedAt => a.ingested_at.cmp(&b.ingested_at),
             SortKey::GameId => a.game_id.cmp(&b.game_id),
             SortKey::Stage => a.stage_name().cmp(b.stage_name()),
             SortKey::Duration => a.duration_seconds.cmp(&b.duration_seconds),
-            // Unreachable — Outcome is handled above. Written out long-hand
-            // so this branch stays `rustc`-exhaustive if we add a new key.
-            SortKey::Outcome => Ordering::Equal,
+            // Unreachable — Outcome / PlayedAt are handled above. Written
+            // out long-hand so this stays `rustc`-exhaustive on a new key.
+            SortKey::Outcome | SortKey::PlayedAt => Ordering::Equal,
         };
         match dir {
             SortDirection::Asc => ord,
@@ -315,6 +331,7 @@ mod tests {
             duration_seconds: 0,
             user_won: None,
             ingested_at: String::new(),
+            played_at: None,
         };
         assert_eq!(row.stage_name(), "FountainOfDreams");
 
@@ -325,6 +342,7 @@ mod tests {
             duration_seconds: 0,
             user_won: None,
             ingested_at: String::new(),
+            played_at: None,
         };
         assert_eq!(row.stage_name(), "Unknown");
     }
@@ -338,6 +356,7 @@ mod tests {
             duration_seconds: secs,
             user_won: None,
             ingested_at: String::new(),
+            played_at: None,
         };
         assert_eq!(mk(0).duration_display(), "0:00");
         assert_eq!(mk(5).duration_display(), "0:05");
@@ -362,7 +381,56 @@ mod tests {
             duration_seconds: dur,
             user_won: won,
             ingested_at: ingested.to_string(),
+            played_at: None,
         }
+    }
+
+    fn row_played(id: i32, played: Option<&str>) -> ReplayRow {
+        ReplayRow {
+            game_id: id,
+            slots: [None, None, None, None],
+            stage_id: 0,
+            duration_seconds: 0,
+            user_won: None,
+            ingested_at: String::new(),
+            played_at: played.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn sort_by_played_at_desc_is_newest_first_with_undated_last() {
+        let mut rows = vec![
+            row_played(1, Some("2025-04-01T10:00:00Z")),
+            row_played(2, None),
+            row_played(3, Some("2025-04-22T08:00:00Z")),
+            row_played(4, Some("2025-04-10T12:00:00Z")),
+        ];
+        sort_rows(&mut rows, SortKey::PlayedAt, SortDirection::Desc);
+        let ids: Vec<_> = rows.iter().map(|r| r.game_id).collect();
+        // Newest played first; the undated row (2) is pinned last.
+        assert_eq!(ids, vec![3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn sort_by_played_at_asc_keeps_undated_last() {
+        let mut rows = vec![
+            row_played(1, Some("2025-04-01")),
+            row_played(2, None),
+            row_played(3, Some("2025-04-22")),
+        ];
+        sort_rows(&mut rows, SortKey::PlayedAt, SortDirection::Asc);
+        let ids: Vec<_> = rows.iter().map(|r| r.game_id).collect();
+        assert_eq!(ids, vec![1, 3, 2], "asc: oldest first, undated still last");
+    }
+
+    #[test]
+    fn played_date_slices_iso_prefix() {
+        assert_eq!(
+            row_played(1, Some("2025-04-01T14:39:10Z")).played_date(),
+            Some("2025-04-01")
+        );
+        assert_eq!(row_played(1, None).played_date(), None);
+        assert_eq!(row_played(1, Some("short")).played_date(), None);
     }
 
     #[test]
@@ -471,137 +539,4 @@ mod tests {
         assert_eq!(SortKey::Outcome.default_direction(), SortDirection::Asc);
     }
 
-    // --- search filter -----------------------------------------------------
-
-    /// Builder for a row populated with two specific player slots —
-    /// the search-filter tests need real codes / characters, which
-    /// `row()` above leaves empty.
-    fn row_with_players(
-        id: i32,
-        ingested: &str,
-        stage: i32,
-        slot0: (&str, i32),
-        slot1: (&str, i32),
-    ) -> ReplayRow {
-        ReplayRow {
-            game_id: id,
-            slots: [
-                Some(PlayerSlot {
-                    code: slot0.0.to_string(),
-                    character_id: slot0.1,
-                }),
-                Some(PlayerSlot {
-                    code: slot1.0.to_string(),
-                    character_id: slot1.1,
-                }),
-                None,
-                None,
-            ],
-            stage_id: stage,
-            duration_seconds: 120,
-            user_won: None,
-            ingested_at: ingested.to_string(),
-        }
-    }
-
-    #[test]
-    fn matches_search_empty_query_matches_everything() {
-        let r = row_with_players(
-            1,
-            "2026-04-20 10:00:00",
-            31, // Battlefield
-            ("MATT#123", 1), // Fox
-            ("OPP#456", 22),  // Falco
-        );
-        assert!(r.matches_search(""));
-        assert!(r.matches_search("   "));
-    }
-
-    #[test]
-    fn matches_search_finds_player_code() {
-        let r = row_with_players(
-            1,
-            "2026-04-20 10:00:00",
-            31,
-            ("MATT#123", 1),
-            ("OPP#456", 22),
-        );
-        // Case-insensitive on both substring and full match.
-        assert!(r.matches_search("matt"));
-        assert!(r.matches_search("MATT"));
-        assert!(r.matches_search("matt#123"));
-        assert!(r.matches_search("opp"));
-        // Substring also works in the middle of the code.
-        assert!(r.matches_search("123"));
-        // No match for a code that isn't there.
-        assert!(!r.matches_search("zelda"));
-    }
-
-    #[test]
-    fn matches_search_finds_character_name() {
-        let r = row_with_players(
-            1,
-            "",
-            31,
-            ("A#1", 1),  // Fox
-            ("B#2", 22), // Falco
-        );
-        assert!(r.matches_search("Fox"));
-        assert!(r.matches_search("fox"));
-        assert!(r.matches_search("Falco"));
-        // Substring of a character name.
-        assert!(r.matches_search("alc")); // "Falco" contains "alc"
-    }
-
-    #[test]
-    fn matches_search_finds_stage_name() {
-        let r = row_with_players(1, "", 31, ("A#1", 1), ("B#2", 22));
-        assert!(r.matches_search("battlefield"));
-        // FoD via substring.
-        let r = row_with_players(2, "", 2, ("A#1", 1), ("B#2", 22));
-        assert!(r.matches_search("fountain"));
-    }
-
-    #[test]
-    fn matches_search_finds_ingested_date_prefix() {
-        let r = row_with_players(
-            1,
-            "2026-04-20 10:00:00",
-            31,
-            ("A#1", 1),
-            ("B#2", 22),
-        );
-        // Year, year-month, full day all match.
-        assert!(r.matches_search("2026"));
-        assert!(r.matches_search("2026-04"));
-        assert!(r.matches_search("2026-04-20"));
-        // Different month doesn't match.
-        assert!(!r.matches_search("2026-05"));
-    }
-
-    #[test]
-    fn matches_search_returns_false_when_nothing_matches() {
-        let r = row_with_players(
-            1,
-            "2026-04-20 10:00:00",
-            31, // Battlefield
-            ("MATT#123", 1), // Fox
-            ("OPP#456", 22), // Falco
-        );
-        // None of these substrings appear in code, character, stage, or date.
-        assert!(!r.matches_search("zelda"));
-        assert!(!r.matches_search("mario"));
-        assert!(!r.matches_search("dreamland"));
-        assert!(!r.matches_search("xyzqq"));
-    }
-
-    #[test]
-    fn matches_search_skips_unpopulated_slots() {
-        // Empty slots must not panic or false-match.
-        let mut r = row_with_players(1, "", 31, ("A#1", 1), ("B#2", 22));
-        r.slots[2] = None;
-        r.slots[3] = None;
-        assert!(r.matches_search("a#1"));
-        assert!(!r.matches_search("c#3"));
-    }
 }

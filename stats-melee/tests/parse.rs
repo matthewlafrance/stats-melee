@@ -31,6 +31,33 @@ fn every_fixture_parses() {
     );
 }
 
+/// The Slippi metadata `startAt` play timestamp should be extracted for the
+/// vast majority of real replays — guards the date-played column/filter
+/// against a peppi metadata-shape change that would silently null it out.
+#[test]
+fn fixtures_carry_played_date() {
+    let slps = fixture_slps().expect("failed to list fixtures");
+    let mut with_date = 0usize;
+    for slp in &slps {
+        let gd = parse_single_replay(slp)
+            .unwrap_or_else(|e| panic!("failed to parse {}: {e}", slp.display()));
+        if let Some(s) = &gd.started_at {
+            // Looks like an ISO-8601 date ("YYYY-MM-DD...").
+            assert!(
+                s.len() >= 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-',
+                "{} has a non-ISO started_at: {s:?}",
+                slp.display()
+            );
+            with_date += 1;
+        }
+    }
+    assert!(
+        with_date * 2 >= slps.len(),
+        "expected most fixtures to carry a played date, got {with_date}/{}",
+        slps.len()
+    );
+}
+
 /// Every parsed fixture should have at least two players (the corpus is all
 /// 1v1), a stage index within the known range, and a non-negative duration.
 #[test]

@@ -28,6 +28,11 @@ diesel::table! {
         // with rows ingested before the column existed and for tests
         // that synthesize GameData without a backing file.
         content_hash -> Nullable<Text>,
+        // ISO-8601 timestamp of when the game was PLAYED, from the Slippi
+        // metadata `startAt`. Distinct from `ingested_at`. Nullable for
+        // rows ingested before this column existed and replays whose
+        // metadata lacked a usable date.
+        started_at -> Nullable<Text>,
     }
 }
 
@@ -51,6 +56,19 @@ diesel::table! {
         inputs -> Nullable<Integer>,
         l_cancel_attempts -> Nullable<Integer>,
         l_cancel_success -> Nullable<Integer>,
+        // Advanced per-game combat metrics (see `src/advanced.rs`), raw
+        // counters turned into ratios by the UI / aggregate queries. All
+        // nullable: legacy / non-1v1 rows store NULL.
+        damage_dealt -> Nullable<Double>,
+        openings -> Nullable<Integer>,
+        neutral_wins -> Nullable<Integer>,
+        adv_frames -> Nullable<Integer>,
+        edgeguard_attempts -> Nullable<Integer>,
+        edgeguard_kills -> Nullable<Integer>,
+        first_blood -> Nullable<Integer>,
+        deaths -> Nullable<Integer>,
+        death_percent_sum -> Nullable<Double>,
+        comeback_win -> Nullable<Integer>,
     }
 }
 

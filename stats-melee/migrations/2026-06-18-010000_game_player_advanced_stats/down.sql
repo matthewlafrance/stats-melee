@@ -1,0 +1,10 @@
+ALTER TABLE game_player_stat DROP COLUMN damage_dealt;
+ALTER TABLE game_player_stat DROP COLUMN openings;
+ALTER TABLE game_player_stat DROP COLUMN neutral_wins;
+ALTER TABLE game_player_stat DROP COLUMN adv_frames;
+ALTER TABLE game_player_stat DROP COLUMN edgeguard_attempts;
+ALTER TABLE game_player_stat DROP COLUMN edgeguard_kills;
+ALTER TABLE game_player_stat DROP COLUMN first_blood;
+ALTER TABLE game_player_stat DROP COLUMN deaths;
+ALTER TABLE game_player_stat DROP COLUMN death_percent_sum;
+ALTER TABLE game_player_stat DROP COLUMN comeback_win;

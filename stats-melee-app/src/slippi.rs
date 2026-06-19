@@ -3,10 +3,14 @@
 //! We don't link against or embed Slippi — the app shells out to the
 //! user's Slippi Dolphin binary using the same protocol the official
 //! Slippi Launcher uses: a small JSON "comm file" is written to the OS
-//! temp directory, and Slippi is invoked with `-i <comm.json> -b`.
+//! temp directory, and Slippi is invoked with `-i <comm.json> -b -e <iso>`.
 //! The `"mode":"normal"` entry tells Slippi to play back the `.slp`
 //! at `replay`; `-b` tells Dolphin to quit when playback ends so we
-//! don't leak emulator windows.
+//! don't leak emulator windows; `-e <iso>` boots the Melee disc image
+//! the replay's inputs run against. Without `-e`, a standalone-launched
+//! playback Dolphin has no game to boot (it opens but never starts the
+//! replay), because — unlike when launched from the Slippi Launcher — its
+//! config has no default ISO set.
 //!
 //! ## Why this matters
 //!
@@ -37,10 +41,20 @@
 //!
 //! ## Platform defaults (no override set)
 //!
-//! - macOS: `/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin`.
-//!   If Slippi is installed elsewhere, set the Settings override.
-//! - Linux / Windows: no default. Returns
-//!   [`SlippiLaunchError::NoDefaultForPlatform`].
+//! Each platform knows where the Slippi Launcher keeps its bundled `playback`
+//! / `netplay` Dolphin builds; the Settings override is the guaranteed
+//! fallback for non-standard installs.
+//!
+//! - macOS: the Launcher's `~/Library/Application Support/Slippi Launcher/`
+//!   builds, then `/Applications/Slippi Dolphin.app`, then a Spotlight
+//!   (`mdfind`) search.
+//! - Windows: `%APPDATA%\Slippi Launcher\{playback,netplay}\Slippi Dolphin.exe`.
+//! - Linux: the first `*.AppImage` under
+//!   `${XDG_CONFIG_HOME:-~/.config}/Slippi Launcher/{playback,netplay}`.
+//!
+//! When discovery finds nothing, [`plan_with_default`] returns
+//! [`SlippiLaunchError::NoDefaultForPlatform`], prompting the user to set the
+//! binary path in Settings.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -111,11 +125,13 @@ pub fn plan_launch(
     replay_path: &str,
     comm_file_path: &Path,
     override_cmd: Option<&str>,
+    iso_path: Option<&str>,
 ) -> Result<LaunchPlan, SlippiLaunchError> {
     plan_with_default(
         replay_path,
         comm_file_path,
         override_cmd,
+        iso_path,
         find_default_binary_for_current_platform(),
     )
 }
@@ -151,12 +167,14 @@ pub fn plan_for_platform(
     replay_path: &str,
     comm_file_path: &Path,
     override_cmd: Option<&str>,
+    iso_path: Option<&str>,
     platform: Platform,
 ) -> Result<LaunchPlan, SlippiLaunchError> {
     plan_with_default(
         replay_path,
         comm_file_path,
         override_cmd,
+        iso_path,
         default_binary_for_platform(platform).ok(),
     )
 }
@@ -169,6 +187,7 @@ fn plan_with_default(
     replay_path: &str,
     comm_file_path: &Path,
     override_cmd: Option<&str>,
+    iso_path: Option<&str>,
     resolved_default: Option<PathBuf>,
 ) -> Result<LaunchPlan, SlippiLaunchError> {
     if replay_path.is_empty() {
@@ -180,13 +199,25 @@ fn plan_with_default(
         None => resolved_default.ok_or(SlippiLaunchError::NoDefaultForPlatform)?,
     };
 
+    // `-i <comm>` tells Slippi which replay to play; `-b` quits Dolphin when
+    // playback ends. `-e <iso>` boots the Melee disc image — without it the
+    // playback build comes up with no game to run (it opens, but the replay
+    // never starts), since a standalone-launched Dolphin has no default ISO
+    // configured. We only append it when an ISO path is set in Settings;
+    // otherwise we fall back to whatever default the user's Dolphin has.
+    let mut args = vec![
+        "-i".to_string(),
+        comm_file_path.display().to_string(),
+        "-b".to_string(),
+    ];
+    if let Some(iso) = iso_path.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("-e".to_string());
+        args.push(iso.to_string());
+    }
+
     Ok(LaunchPlan {
         program: program.display().to_string(),
-        args: vec![
-            "-i".to_string(),
-            comm_file_path.display().to_string(),
-            "-b".to_string(),
-        ],
+        args,
     })
 }
 
@@ -230,24 +261,96 @@ fn default_binary_for_platform(platform: Platform) -> Result<PathBuf, SlippiLaun
 
 // --- IO-based discovery -----------------------------------------------------
 
-/// Cached result of the macOS default lookup. We only run the
-/// stat-checks + mdfind call once per app lifetime — a new Slippi
-/// install won't be picked up without a restart, but that's a fine
-/// tradeoff for not shelling out every click.
-static MACOS_DEFAULT_BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// Cached result of the default-binary lookup. We only run the disk
+/// probes (and, on macOS, the `mdfind` call) once per app lifetime — a
+/// new Slippi install won't be picked up without a restart, but that's a
+/// fine tradeoff for not shelling out / stat-ing on every click.
+static DEFAULT_BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Runtime default-binary resolution. Returns `Some(inner_binary)` if
-/// we found a working Slippi Dolphin install, `None` otherwise — in
-/// which case [`plan_with_default`] will surface
+/// Runtime default-binary resolution for the current OS. Returns
+/// `Some(binary)` if we found a Slippi Dolphin install, `None` otherwise —
+/// in which case [`plan_with_default`] surfaces
 /// [`SlippiLaunchError::NoDefaultForPlatform`] so the user gets a
-/// "set the binary path in Settings" prompt.
+/// "set the binary path in Settings" prompt. Each platform knows where the
+/// Slippi Launcher keeps its bundled Dolphin builds; the manual override in
+/// Settings is always the guaranteed fallback for non-standard installs.
 fn find_default_binary_for_current_platform() -> Option<PathBuf> {
-    match current_platform() {
-        Platform::MacOs => MACOS_DEFAULT_BINARY
-            .get_or_init(find_macos_default_binary_uncached)
-            .clone(),
-        _ => None,
+    DEFAULT_BINARY
+        .get_or_init(|| match current_platform() {
+            Platform::MacOs => find_macos_default_binary_uncached(),
+            Platform::Windows => find_windows_default_binary_uncached(),
+            Platform::Linux => find_linux_default_binary_uncached(),
+            Platform::Unknown => None,
+        })
+        .clone()
+}
+
+/// Ordered Windows candidates. The Slippi Launcher installs its Dolphin
+/// builds under `%APPDATA%\Slippi Launcher\{playback,netplay}\`, each a
+/// `Slippi Dolphin.exe`. Pure — exposed for unit tests.
+fn windows_default_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let base = PathBuf::from(&appdata).join("Slippi Launcher");
+        // `playback` first — the build designed for `-i <comm> -b`. `netplay`
+        // is the same Dolphin fork and works as a fallback.
+        out.push(base.join("playback").join("Slippi Dolphin.exe"));
+        out.push(base.join("netplay").join("Slippi Dolphin.exe"));
     }
+    out
+}
+
+fn find_windows_default_binary_uncached() -> Option<PathBuf> {
+    windows_default_candidates().into_iter().find(|p| p.is_file())
+}
+
+/// The Slippi Launcher's Dolphin directories on Linux:
+/// `${XDG_CONFIG_HOME:-~/.config}/Slippi Launcher/{playback,netplay}`. Pure —
+/// exposed for unit tests.
+fn linux_dolphin_dirs() -> Vec<PathBuf> {
+    let config = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME").map(|s| s.trim().to_string()) {
+        if xdg.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(xdg))
+        }
+    } else {
+        None
+    }
+    .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")));
+
+    match config {
+        Some(c) => {
+            let root = c.join("Slippi Launcher");
+            vec![root.join("playback"), root.join("netplay")]
+        }
+        None => Vec::new(),
+    }
+}
+
+fn find_linux_default_binary_uncached() -> Option<PathBuf> {
+    // The Launcher ships Dolphin as an AppImage whose exact filename changes
+    // per release, so scan each build dir for the first `*.AppImage`.
+    linux_dolphin_dirs()
+        .iter()
+        .find_map(|dir| first_appimage_in(dir))
+}
+
+/// First `*.AppImage` (case-insensitive extension) in `dir`, chosen
+/// deterministically (sorted) so repeat launches pick the same file. `None`
+/// if the directory is unreadable or holds no AppImage.
+fn first_appimage_in(dir: &Path) -> Option<PathBuf> {
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("AppImage"))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
 }
 
 fn find_macos_default_binary_uncached() -> Option<PathBuf> {
@@ -395,12 +498,60 @@ fn write_comm_file(replay_path: &str) -> Result<PathBuf, SlippiLaunchError> {
 
 /// Launch Slippi with the given plan. Spawns a detached child process
 /// — we don't wait for it or capture its stdout/stderr.
+///
+/// On macOS, when the program is an `.app`-bundled binary (the normal case),
+/// we route through `open -n -a <bundle> --args <flags>` instead of spawning
+/// the inner binary directly. A directly-spawned GUI process opens *behind*
+/// our window — the user would have to click the dock icon to bring Dolphin
+/// up. `open` goes through LaunchServices, which activates Dolphin to the
+/// foreground; `-n` forces a fresh instance and `--args` forwards Dolphin's
+/// CLI flags to the executable. A bare-binary override (no bundle) or a
+/// non-macOS platform falls back to a direct spawn.
 pub fn launch(plan: &LaunchPlan) -> Result<(), SlippiLaunchError> {
-    Command::new(&plan.program)
-        .args(&plan.args)
+    let bundle = if cfg!(target_os = "macos") {
+        app_bundle_for_inner_binary(Path::new(&plan.program))
+    } else {
+        None
+    };
+
+    let mut command = match bundle {
+        Some(bundle) => {
+            let mut c = Command::new("open");
+            c.arg("-n").arg("-a").arg(bundle).arg("--args").args(&plan.args);
+            c
+        }
+        None => {
+            let mut c = Command::new(&plan.program);
+            c.args(&plan.args);
+            c
+        }
+    };
+
+    command
         .spawn()
         .map(|_| ())
         .map_err(|e| SlippiLaunchError::SpawnFailed(e.to_string()))
+}
+
+/// Given a resolved inner-binary path that follows the macOS
+/// `<Name>.app/Contents/MacOS/<Name>` convention, return the enclosing
+/// `.app` bundle so it can be handed to `open -a`. Returns `None` for paths
+/// that don't match — e.g. a bare Unix binary a power user pointed the
+/// override at, which has no bundle and must be spawned directly.
+fn app_bundle_for_inner_binary(program: &Path) -> Option<PathBuf> {
+    let macos_dir = program.parent()?; // <bundle>.app/Contents/MacOS
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos_dir.parent()?; // <bundle>.app/Contents
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?; // <bundle>.app
+    if bundle.extension()? != "app" {
+        return None;
+    }
+    Some(bundle.to_path_buf())
 }
 
 /// Convenience: preflight + write comm file + plan + spawn, in one
@@ -410,6 +561,7 @@ pub fn launch(plan: &LaunchPlan) -> Result<(), SlippiLaunchError> {
 pub fn launch_replay(
     replay_path: &str,
     override_cmd: Option<&str>,
+    iso_path: Option<&str>,
 ) -> Result<(), SlippiLaunchError> {
     if replay_path.is_empty() {
         return Err(SlippiLaunchError::NoReplayPath);
@@ -419,7 +571,7 @@ pub fn launch_replay(
         return Err(SlippiLaunchError::ReplayFileMissing(p.to_path_buf()));
     }
     let comm = write_comm_file(replay_path)?;
-    let plan = plan_launch(replay_path, &comm, override_cmd)?;
+    let plan = plan_launch(replay_path, &comm, override_cmd, iso_path)?;
     launch(&plan)
 }
 
@@ -437,6 +589,7 @@ mod tests {
             "/tmp/game.slp",
             &fake_comm(),
             Some("/usr/local/bin/slippi"),
+            None,
             Platform::MacOs,
         )
         .expect("should succeed");
@@ -459,6 +612,7 @@ mod tests {
             "/tmp/game.slp",
             &fake_comm(),
             Some("  /usr/local/bin/slippi  "),
+            None,
             Platform::Linux,
         )
         .expect("should succeed");
@@ -474,6 +628,7 @@ mod tests {
             "/tmp/game.slp",
             &fake_comm(),
             Some("/Applications/Slippi Dolphin.app"),
+            None,
             Platform::MacOs,
         )
         .expect("should succeed");
@@ -505,9 +660,27 @@ mod tests {
     }
 
     #[test]
+    fn app_bundle_derived_from_inner_binary() {
+        // The inner binary `open -a` needs to foreground-launch the bundle.
+        let inner = Path::new("/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin");
+        assert_eq!(
+            app_bundle_for_inner_binary(inner),
+            Some(PathBuf::from("/Applications/Slippi Dolphin.app"))
+        );
+    }
+
+    #[test]
+    fn app_bundle_none_for_bare_or_malformed_paths() {
+        // Bare binary (power-user override) — no bundle, spawn directly.
+        assert!(app_bundle_for_inner_binary(Path::new("/usr/local/bin/slippi")).is_none());
+        // Has Contents/MacOS but the grandparent isn't a `.app`.
+        assert!(app_bundle_for_inner_binary(Path::new("/opt/Contents/MacOS/foo")).is_none());
+    }
+
+    #[test]
     fn empty_or_whitespace_override_falls_back_to_platform_default() {
         // Blank override should act like None — hit macOS default.
-        let plan = plan_for_platform("/tmp/g.slp", &fake_comm(), Some("   "), Platform::MacOs)
+        let plan = plan_for_platform("/tmp/g.slp", &fake_comm(), Some("   "), None, Platform::MacOs)
             .expect("should succeed");
         assert_eq!(
             plan.program,
@@ -517,13 +690,13 @@ mod tests {
 
     #[test]
     fn empty_replay_path_rejected() {
-        let err = plan_for_platform("", &fake_comm(), None, Platform::MacOs).unwrap_err();
+        let err = plan_for_platform("", &fake_comm(), None, None, Platform::MacOs).unwrap_err();
         assert!(matches!(err, SlippiLaunchError::NoReplayPath));
     }
 
     #[test]
     fn macos_default_points_at_app_bundle_inner_binary() {
-        let plan = plan_for_platform("/data/game.slp", &fake_comm(), None, Platform::MacOs)
+        let plan = plan_for_platform("/data/game.slp", &fake_comm(), None, None, Platform::MacOs)
             .expect("should succeed");
         assert_eq!(
             plan.program,
@@ -535,22 +708,62 @@ mod tests {
     }
 
     #[test]
+    fn iso_path_appends_exec_arg() {
+        // With a Melee ISO configured, the plan must append `-e <iso>` so
+        // Dolphin actually boots the game the replay runs against.
+        let plan = plan_for_platform(
+            "/data/game.slp",
+            &fake_comm(),
+            None,
+            Some("/games/melee.iso"),
+            Platform::MacOs,
+        )
+        .expect("should succeed");
+        assert_eq!(
+            plan.args,
+            vec![
+                "-i".to_string(),
+                "/tmp/slippi-comm.json".to_string(),
+                "-b".to_string(),
+                "-e".to_string(),
+                "/games/melee.iso".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_iso_path_is_ignored() {
+        // A whitespace-only ISO path should be treated as "not set" — no
+        // trailing `-e` with an empty argument.
+        let plan = plan_for_platform(
+            "/data/game.slp",
+            &fake_comm(),
+            None,
+            Some("   "),
+            Platform::MacOs,
+        )
+        .expect("should succeed");
+        assert_eq!(plan.args.len(), 3, "got: {:?}", plan.args);
+        assert!(!plan.args.iter().any(|a| a == "-e"));
+    }
+
+    #[test]
     fn linux_default_errors_without_override() {
-        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, Platform::Linux)
+        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, None, Platform::Linux)
             .unwrap_err();
         assert!(matches!(err, SlippiLaunchError::NoDefaultForPlatform));
     }
 
     #[test]
     fn windows_default_errors_without_override() {
-        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, Platform::Windows)
+        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, None, Platform::Windows)
             .unwrap_err();
         assert!(matches!(err, SlippiLaunchError::NoDefaultForPlatform));
     }
 
     #[test]
     fn unknown_platform_errors_without_override() {
-        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, Platform::Unknown)
+        let err = plan_for_platform("/data/game.slp", &fake_comm(), None, None, Platform::Unknown)
             .unwrap_err();
         assert!(matches!(err, SlippiLaunchError::NoDefaultForPlatform));
     }
@@ -654,10 +867,35 @@ mod tests {
     }
 
     #[test]
+    fn windows_candidates_order_playback_before_netplay() {
+        // Set a known APPDATA so the test is deterministic regardless of host.
+        std::env::set_var("APPDATA", r"C:\Users\me\AppData\Roaming");
+        let c = windows_default_candidates();
+        std::env::remove_var("APPDATA");
+        assert_eq!(c.len(), 2);
+        assert!(c[0].to_string_lossy().contains("playback"));
+        assert!(c[0].to_string_lossy().ends_with("Slippi Dolphin.exe"));
+        assert!(c[1].to_string_lossy().contains("netplay"));
+    }
+
+    #[test]
+    fn linux_dirs_prefer_xdg_then_playback() {
+        std::env::set_var("XDG_CONFIG_HOME", "/home/me/.config");
+        let dirs = linux_dolphin_dirs();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0]
+            .to_string_lossy()
+            .ends_with("/Slippi Launcher/playback"));
+        assert!(dirs[1].to_string_lossy().ends_with("/Slippi Launcher/netplay"));
+    }
+
+    #[test]
     fn plan_with_default_uses_provided_default_when_override_missing() {
         let plan = plan_with_default(
             "/tmp/game.slp",
             &fake_comm(),
+            None,
             None,
             Some(PathBuf::from("/custom/discovered/Slippi Dolphin")),
         )
@@ -673,6 +911,7 @@ mod tests {
             "/tmp/game.slp",
             &fake_comm(),
             Some("/custom/override/Slippi Dolphin"),
+            None,
             Some(PathBuf::from("/discovered/path/Slippi Dolphin")),
         )
         .expect("should succeed");
@@ -681,7 +920,7 @@ mod tests {
 
     #[test]
     fn plan_with_default_errors_when_both_missing() {
-        let err = plan_with_default("/tmp/g.slp", &fake_comm(), None, None).unwrap_err();
+        let err = plan_with_default("/tmp/g.slp", &fake_comm(), None, None, None).unwrap_err();
         assert!(matches!(err, SlippiLaunchError::NoDefaultForPlatform));
     }
 

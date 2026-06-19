@@ -24,6 +24,10 @@ pub struct Game {
     /// `None` for rows ingested before the column existed and for
     /// tests that synthesize a `GameData` without a backing file.
     pub content_hash: Option<String>,
+    /// ISO-8601 timestamp of when the game was played, from the Slippi
+    /// metadata `startAt`. `None` for legacy rows and replays without a
+    /// usable metadata date.
+    pub started_at: Option<String>,
 }
 
 #[derive(Queryable, Selectable)]
@@ -91,6 +95,9 @@ pub struct NewGame<'a> {
     /// passes `Some(<hex SHA-256>)` so the analysis sidecar cache
     /// (Track 11) has a stable key.
     pub content_hash: Option<&'a str>,
+    /// ISO-8601 play timestamp from the .slp metadata `startAt`, or
+    /// `None` when absent.
+    pub started_at: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -130,6 +137,27 @@ pub struct GamePlayerStat {
     /// Number of aerial-landing frames with `l_cancel == 1` (successful
     /// L-cancel). `l_cancel_success / l_cancel_attempts` is the rate.
     pub l_cancel_success: Option<i32>,
+    // --- Advanced per-game combat metrics (see `crate::advanced`) ---------
+    /// Total percent dealt to the opponent across this game.
+    pub damage_dealt: Option<f64>,
+    /// Conversions started (denominator for damage-per-opening).
+    pub openings: Option<i32>,
+    /// Openings that began from neutral.
+    pub neutral_wins: Option<i32>,
+    /// Frames this player held the advantage (for stage control %).
+    pub adv_frames: Option<i32>,
+    /// Punishes where the opponent was offstage (edge-guard attempts).
+    pub edgeguard_attempts: Option<i32>,
+    /// Edge-guard attempts that killed (successes).
+    pub edgeguard_kills: Option<i32>,
+    /// `1` if this player took the game's first stock, else `0`.
+    pub first_blood: Option<i32>,
+    /// Times this player lost a stock.
+    pub deaths: Option<i32>,
+    /// Sum of the percents this player died at (÷ `deaths` = avg death %).
+    pub death_percent_sum: Option<f64>,
+    /// `1` if this player won after trailing by >= 2 stocks, else `0`.
+    pub comeback_win: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -143,6 +171,16 @@ pub struct NewGamePlayerStat {
     pub inputs: Option<i32>,
     pub l_cancel_attempts: Option<i32>,
     pub l_cancel_success: Option<i32>,
+    pub damage_dealt: Option<f64>,
+    pub openings: Option<i32>,
+    pub neutral_wins: Option<i32>,
+    pub adv_frames: Option<i32>,
+    pub edgeguard_attempts: Option<i32>,
+    pub edgeguard_kills: Option<i32>,
+    pub first_blood: Option<i32>,
+    pub deaths: Option<i32>,
+    pub death_percent_sum: Option<f64>,
+    pub comeback_win: Option<i32>,
 }
 
 /// One combo opportunity by one attacker against the lone opponent in a 1v1.

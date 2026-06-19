@@ -27,7 +27,10 @@ egui = "0.29"
 egui_extras = "0.29"
 
 # Native platform goodies.
-rfd = "0.14"          # system file/folder picker dialogs
+# System file/folder picker dialogs. 0.14's default features use the XDG
+# Desktop Portal backend on Linux (not GTK), so the build needs no
+# libgtk-3-dev — keep `gtk3` *off*.
+rfd = "0.14"
 directories = "5"     # OS-appropriate config + data dirs (ProjectDirs)
 
 # Decoding character/stage icon PNGs for the replay library + viewer.

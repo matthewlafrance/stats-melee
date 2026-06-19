@@ -1,0 +1,52 @@
+name: CI
+
+# Proves the workspace compiles and the unit tests pass on all three target
+# OSes — the cross-platform gate before cutting a release.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # egui's clipboard (arboard) + winit pull a few X/keyboard libs at build
+      # time on Linux. No libgtk-3-dev: rfd uses the XDG Desktop Portal backend.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      # Compile everything, including the fixture-backed integration tests, so a
+      # platform-specific build break surfaces even though we can't *run* those
+      # tests in CI.
+      - name: Build (all targets)
+        run: cargo build --workspace --all-targets --locked
+
+      # Run only the fixture-free unit tests. The integration tests in
+      # stats-melee/tests/ need the ~800 MB .slp corpus (`test_slps/`, kept out
+      # of git — see .gitignore), which isn't present on a fresh CI checkout.
+      - name: Test (unit)
+        run: cargo test --workspace --lib --bins --locked

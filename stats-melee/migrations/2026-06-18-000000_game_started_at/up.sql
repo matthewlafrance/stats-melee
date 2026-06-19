@@ -1,0 +1,11 @@
+-- Record when each game was actually PLAYED (distinct from `ingested_at`,
+-- which is when the row was inserted). Sourced at ingest time from the
+-- Slippi metadata block's `startAt` field — an ISO-8601 timestamp like
+-- "2025-04-01T14:39:10Z". Nullable: legacy rows ingested before this
+-- column existed stay NULL until re-ingested, and the occasional replay
+-- with a missing/garbled metadata date also stores NULL.
+--
+-- A plain nullable ADD COLUMN is allowed here (unlike `ingested_at`, which
+-- needed a CURRENT_TIMESTAMP default and so a table rebuild) because the
+-- default is the constant NULL.
+ALTER TABLE game ADD COLUMN started_at TEXT;

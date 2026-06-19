@@ -325,13 +325,13 @@ fn player_summary_filtered_narrows_by_character_and_stage() {
     let by_char = player_summary_filtered(
         &mut db.conn,
         &target_code,
-        &PlayerSummaryFilter { character_id: Some(pick_char), stage_id: None },
+        &PlayerSummaryFilter { character_id: Some(pick_char), stage_id: None, game_ids: None },
     )
     .expect("filter by character");
     let by_stage = player_summary_filtered(
         &mut db.conn,
         &target_code,
-        &PlayerSummaryFilter { character_id: None, stage_id: Some(pick_stage) },
+        &PlayerSummaryFilter { character_id: None, stage_id: Some(pick_stage), game_ids: None },
     )
     .expect("filter by stage");
     let by_both = player_summary_filtered(
@@ -340,6 +340,7 @@ fn player_summary_filtered_narrows_by_character_and_stage() {
         &PlayerSummaryFilter {
             character_id: Some(pick_char),
             stage_id: Some(pick_stage),
+            game_ids: None,
         },
     )
     .expect("filter by both");
@@ -373,5 +374,56 @@ fn player_summary_filtered_narrows_by_character_and_stage() {
         "both-filter wider than stage-only: {} > {}",
         by_both.games_played,
         by_stage.games_played
+    );
+
+    // The `game_ids` restriction (how the GUI threads its full library
+    // filter down): restricting to the player's *entire* game set is a no-op;
+    // a single id restricts to at most one game; an empty set matches none.
+    let all_ids: Vec<i32> = games.iter().map(|g| g.id).collect();
+    let by_all_ids = player_summary_filtered(
+        &mut db.conn,
+        &target_code,
+        &PlayerSummaryFilter {
+            character_id: None,
+            stage_id: None,
+            game_ids: Some(all_ids.clone()),
+        },
+    )
+    .expect("filter by all game ids");
+    assert_eq!(
+        by_all_ids.games_played, unfiltered.games_played,
+        "restricting to the player's full game set changed the count"
+    );
+
+    let one_id = vec![*all_ids.first().expect("at least one game")];
+    let by_one_id = player_summary_filtered(
+        &mut db.conn,
+        &target_code,
+        &PlayerSummaryFilter {
+            character_id: None,
+            stage_id: None,
+            game_ids: Some(one_id),
+        },
+    )
+    .expect("filter by one game id");
+    assert!(
+        by_one_id.games_played <= 1,
+        "single-game-id filter returned {} games",
+        by_one_id.games_played
+    );
+
+    let by_empty = player_summary_filtered(
+        &mut db.conn,
+        &target_code,
+        &PlayerSummaryFilter {
+            character_id: None,
+            stage_id: None,
+            game_ids: Some(Vec::new()),
+        },
+    )
+    .expect("filter by empty game ids");
+    assert_eq!(
+        by_empty.games_played, 0,
+        "empty game-id set should match no games"
     );
 }
