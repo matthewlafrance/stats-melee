@@ -74,6 +74,15 @@ impl IconCache {
     fn resolve_base(&mut self) -> &Option<PathBuf> {
         self.base.get_or_insert_with(assets_base)
     }
+
+    /// Drop every cached texture and the resolved base dir so the next icon
+    /// access re-probes disk. Called after re-extracting icons from Slippi so
+    /// the freshly-written art appears without restarting the app.
+    pub fn clear(&mut self) {
+        self.base = None;
+        self.chars.clear();
+        self.stages.clear();
+    }
 }
 
 /// Build `<base>/<sub>/<Name>.png` for a valid id whose table entry

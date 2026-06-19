@@ -268,6 +268,10 @@ pub struct StatsMeleeApp {
     /// navigates to a different replay.
     last_slippi_launch: Option<Result<(), String>>,
 
+    /// Result of the most recent Settings "Re-extract icons from Slippi"
+    /// click — `(characters, stages)` on success, else an error message.
+    last_icon_extract: Option<Result<(usize, usize), String>>,
+
     /// Persistent file-backed cache for [`ReplayAnalysis`] keyed on
     /// each .slp's content hash. Constructed once at app startup; the
     /// viewer's load path consults it before re-parsing peppi, which
@@ -441,6 +445,7 @@ impl StatsMeleeApp {
             viewing_game_id: None,
             viewer_state: None,
             last_slippi_launch: None,
+            last_icon_extract: None,
             analysis_cache,
             video_cache,
             render_rx: None,
@@ -987,6 +992,26 @@ impl StatsMeleeApp {
                 self.last_slippi_launch = Some(Err(e.to_string()));
             }
         }
+    }
+
+    /// Settings action: re-rip character / stage icons from the local Slippi
+    /// install into the writable assets dir, then clear the icon cache so the
+    /// new art shows immediately. Records the outcome in `last_icon_extract`.
+    fn reextract_icons(&mut self) {
+        let dest = match AppConfig::default_assets_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.last_icon_extract = Some(Err(e.to_string()));
+                return;
+            }
+        };
+        self.last_icon_extract = Some(match crate::slippi_icons::extract_to(&dest) {
+            Ok((c, s)) => {
+                self.icons.clear();
+                Ok((c, s))
+            }
+            Err(e) => Err(e.to_string()),
+        });
     }
 
     /// Populate `self.viewer_state` for the currently-viewed game.
@@ -2770,6 +2795,7 @@ impl StatsMeleeApp {
         let mut melee_iso_save_pending = false;
         let mut melee_iso_pick_clicked = false;
         let mut ffmpeg_save_pending = false;
+        let mut icon_extract_clicked = false;
 
         egui::Grid::new("settings_grid")
             .num_columns(2)
@@ -2861,6 +2887,21 @@ impl StatsMeleeApp {
                 });
                 ui.end_row();
 
+                // Character / stage icons — re-rip from the local Slippi
+                // install (e.g. after a Slippi update, or once Slippi is
+                // installed if it wasn't at first launch).
+                ui.label("Character / stage icons").on_hover_text(
+                    "Copies the stock icons + stage art out of your local \
+                     Slippi Launcher install. Done automatically on first \
+                     launch; use this to refresh after a Slippi update.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Re-extract from Slippi").clicked() {
+                        icon_extract_clicked = true;
+                    }
+                });
+                ui.end_row();
+
                 // Melee ISO + ffmpeg rows — only relevant for the
                 // in-house render-video pipeline, which is parked
                 // (RENDER_VIDEO_FEATURE_ENABLED = false) while we ship
@@ -2940,10 +2981,25 @@ impl StatsMeleeApp {
         if melee_iso_save_pending || ffmpeg_save_pending {
             self.save_config();
         }
+        if icon_extract_clicked {
+            self.reextract_icons();
+        }
 
         ui.add_space(16.0);
         if let Some(err) = &self.last_config_error {
             ui.colored_label(egui::Color32::RED, format!("Config save failed: {err}"));
+        }
+        if let Some(result) = &self.last_icon_extract {
+            match result {
+                Ok((c, s)) => ui.colored_label(
+                    egui::Color32::from_rgb(90, 180, 100),
+                    format!("✓ Extracted {c} character + {s} stage icons from Slippi."),
+                ),
+                Err(e) => ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("⚠ Icon extraction failed: {e}"),
+                ),
+            };
         }
 
         // "Delete all replays" sits inline at the bottom of Settings.
