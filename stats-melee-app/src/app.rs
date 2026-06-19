@@ -356,6 +356,10 @@ impl StatsMeleeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let config = AppConfig::load();
+        // First launch: rip character / stage icons from a local Slippi install
+        // into the writable assets dir so the library/viewer show real art
+        // instead of badges. One-shot, best-effort, off the render path.
+        ensure_slippi_icons();
         // If onboarding is needed, default to Settings so the first thing
         // the user sees is the "pick replay folder" widget.
         let page = if config.needs_onboarding() {
@@ -3197,6 +3201,32 @@ fn resolve_vanilla_dolphin_binary(config: &AppConfig) -> Option<PathBuf> {
             let raw = PathBuf::from(s);
             predict_app_inner_binary(&raw).unwrap_or(raw)
         })
+}
+
+/// First-launch icon population: if the writable assets dir has no character
+/// art yet, rip it from a local Slippi Launcher install. Best-effort and
+/// one-shot — no Slippi, no write permission, or a bundle-layout change all
+/// just leave the drawn-badge fallback in place. Re-runs (cheaply, hitting the
+/// no-Slippi path fast) only while the dir stays empty, so installing Slippi
+/// later still gets picked up on a subsequent launch.
+fn ensure_slippi_icons() {
+    let Ok(dest) = AppConfig::default_assets_dir() else {
+        return;
+    };
+    let chars_dir = dest.join("characters");
+    let already = std::fs::read_dir(&chars_dir)
+        .map(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x == "png")))
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    match crate::slippi_icons::extract_to(&dest) {
+        Ok((c, s)) => eprintln!(
+            "stats-melee: extracted {c} character + {s} stage icons from Slippi into {}",
+            dest.display()
+        ),
+        Err(e) => eprintln!("stats-melee: Slippi icon extraction skipped ({e})"),
+    }
 }
 
 /// Cross-platform "open this file in the OS default handler". Shells

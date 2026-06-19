@@ -97,6 +97,14 @@ fn load_texture(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Tex
 }
 
 fn assets_base() -> Option<PathBuf> {
+    // Writable OS data dir, where the first-launch Slippi rip lands. Checked
+    // first so freshly-extracted (current-version) icons win, and so a
+    // read-only packaged binary still has somewhere to read art from.
+    if let Ok(data) = crate::config::AppConfig::default_assets_dir() {
+        if data.is_dir() {
+            return Some(data);
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let next_to_exe = dir.join("assets");

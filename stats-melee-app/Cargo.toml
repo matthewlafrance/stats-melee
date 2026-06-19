@@ -40,6 +40,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Settings persistence.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1" # parse the Slippi Launcher's asar header (icon extraction)
 toml = "0.8"
 
 # Shared error handling story with the library crate.

@@ -232,15 +232,21 @@ mod tests {
         "/../test_slps/Game_20250402T140144.slp"
     );
 
-    fn parse_fixture() -> peppi::game::immutable::Game {
+    /// Parse the fixture, or `None` when it isn't on disk. The corpus is
+    /// local-only (gitignored), so these tests skip rather than fail on a
+    /// fresh checkout / CI / cleared corpus.
+    fn parse_fixture() -> Option<peppi::game::immutable::Game> {
         use std::{fs, io};
-        let mut r = io::BufReader::new(fs::File::open(FIXTURE).expect("fixture not found"));
-        peppi::io::slippi::read(&mut r, None).expect("parse failed")
+        let file = fs::File::open(FIXTURE).ok()?;
+        let mut r = io::BufReader::new(file);
+        Some(peppi::io::slippi::read(&mut r, None).expect("parse failed"))
     }
 
     #[test]
     fn slp_to_dtm_two_ports_for_1v1() {
-        let game = parse_fixture();
+        let Some(game) = parse_fixture() else {
+            return;
+        };
         let result = slp_to_dtm(&game).expect("slp_to_dtm failed");
         // 1v1 replay → exactly 2 active ports
         assert_eq!(
@@ -252,7 +258,9 @@ mod tests {
 
     #[test]
     fn slp_to_dtm_controllers_plugged_ports_1_2() {
-        let game = parse_fixture();
+        let Some(game) = parse_fixture() else {
+            return;
+        };
         let result = slp_to_dtm(&game).expect("slp_to_dtm failed");
         // Typical 1v1 uses P1+P2 → bitmask 0b00000011
         assert_eq!(result.controllers_plugged, 0b00000011);
@@ -260,7 +268,9 @@ mod tests {
 
     #[test]
     fn slp_to_dtm_outputs_two_polls_per_slippi_frame() {
-        let game = parse_fixture();
+        let Some(game) = parse_fixture() else {
+            return;
+        };
         let slippi_frames = game.frames.id.len();
         let result = slp_to_dtm(&game).expect("slp_to_dtm failed");
         assert_eq!(result.frames.len(), slippi_frames * 2);
@@ -271,7 +281,9 @@ mod tests {
         // Every stick byte should be in [0, 255] — trivially true for u8 —
         // but we also check that at least some frames have a non-zero
         // stick value (i.e., the conversion isn't clamping everything away).
-        let game = parse_fixture();
+        let Some(game) = parse_fixture() else {
+            return;
+        };
         let result = slp_to_dtm(&game).expect("slp_to_dtm failed");
         let any_nonzero_stick = result.frames.iter().any(|frame| {
             frame.iter().any(|c| c.stick_x != 0 || c.stick_y != 0)
@@ -283,7 +295,9 @@ mod tests {
     fn slp_to_dtm_first_few_frames_are_neutral_buttons() {
         // Slippi frames start at -123 (countdown). The first several frames
         // should have no buttons pressed (neutral pad while the game loads).
-        let game = parse_fixture();
+        let Some(game) = parse_fixture() else {
+            return;
+        };
         let result = slp_to_dtm(&game).expect("slp_to_dtm failed");
         let first = &result.frames[0];
         for ctrl in first {

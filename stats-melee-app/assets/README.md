@@ -33,9 +33,17 @@ e.g. `assets/stages/Battlefield.png`
 
 ## Where to get them
 
-These tools (Slippipedia, slippi.gg, the Slippi Launcher) all use stock
-icons ripped from Melee — Nintendo's art, redistributed by the community.
-A common source is the Slippi Launcher's open-source asset folder or a
-community stock-icon pack. Bringing those into this repo is the repo
-owner's call; this folder is `.gitignore`-friendly if you'd rather keep
-the art untracked.
+The app rips them for you. On first launch it pulls the stock icons +
+stage art straight out of your local **Slippi Launcher** install (the
+`app.asar` bundle) into its data dir — see `src/slippi_icons.rs`. No
+network, no redistribution; you only ever touch your own copy.
+
+To populate *this* source-tree folder instead (for `cargo run` dev), run
+the standalone extractor, which does the same thing:
+
+```sh
+python3 scripts/extract-slippi-icons.py        # auto-detects Slippi
+```
+
+These are Nintendo's art, so the PNGs stay `.gitignore`d by default —
+bringing them into the repo is the repo owner's call.

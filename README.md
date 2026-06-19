@@ -72,13 +72,25 @@ sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
 
 ## Icons
 
-Character and stage icons are rendered from PNGs under `assets/characters/` and
-`assets/stages/`, named by the internal character/stage name (e.g.
-`assets/characters/Falco.png`). **No art ships with releases** — those icons
-are Nintendo's, so you supply your own. Until a file is present the app draws a
-tinted abbreviation badge instead, so the UI works fine with an empty or
-partial set. See [`stats-melee-app/assets/README.md`](stats-melee-app/assets/README.md)
-for naming and where community stock-icon packs come from.
+**On first launch the app automatically rips character + stage icons from your
+local Slippi Launcher install** into its data dir, so the library and viewer
+show real Melee art. The art is Nintendo's, so **nothing ships in the
+download** — you get it from the copy of Slippi you already have. No Slippi
+installed (or it's somewhere unusual)? The app falls back to tinted
+abbreviation badges, so the UI works fine either way.
+
+It re-rips automatically whenever that icon folder is empty, so to refresh
+after a Slippi update just delete the `assets/` folder in the app's data dir
+(see [Data & config locations](#data--config-locations)) and relaunch. From a
+source checkout you can also run the standalone extractor, which writes into
+`stats-melee-app/assets/`:
+
+```sh
+python3 stats-melee-app/scripts/extract-slippi-icons.py   # --asar / --out optional
+```
+
+See [`stats-melee-app/assets/README.md`](stats-melee-app/assets/README.md) for
+the naming scheme if you'd rather drop in your own icon pack.
 
 ## Data & config locations
 

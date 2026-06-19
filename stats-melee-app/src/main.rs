@@ -15,6 +15,7 @@ mod icons;
 mod render_worker;
 mod replay_list;
 mod slippi;
+mod slippi_icons;
 mod viewer;
 
 use app::StatsMeleeApp;

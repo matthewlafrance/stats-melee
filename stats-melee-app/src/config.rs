@@ -121,6 +121,14 @@ impl AppConfig {
         Ok(project_dirs()?.data_dir().join("stats_melee.db"))
     }
 
+    /// Writable directory the app extracts character / stage icons into (and
+    /// loads them from). Lives under the OS data dir so it works for a
+    /// read-only packaged binary, unlike the source-tree / next-to-exe
+    /// `assets/` folders.
+    pub fn default_assets_dir() -> Result<PathBuf> {
+        Ok(project_dirs()?.data_dir().join("assets"))
+    }
+
     /// The DB path the app should actually open — user override if set,
     /// otherwise the OS-default data location.
     pub fn effective_db_path(&self) -> Result<PathBuf> {
