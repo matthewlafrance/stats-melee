@@ -219,9 +219,17 @@ fn parse_chunk(
         let Some(end) = after.find(".png\"") else {
             continue;
         };
-        let hash = &after[..end];
-        if !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            mod_to_file.insert(module_id.to_string(), format!("{hash}.png"));
+        // The filename between `.p+"` and `.png"`. Usually a bare content hash,
+        // but some Slippi/webpack builds nest assets in a subfolder (e.g.
+        // `media/<hash>`), so accept path separators + the usual filename
+        // characters and resolve the components against the bundle on read.
+        let stem = &after[..end];
+        let looks_like_filename = !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'));
+        if looks_like_filename {
+            mod_to_file.insert(module_id.to_string(), format!("{stem}.png"));
         }
     }
 
@@ -274,15 +282,38 @@ fn parse_chunk(
     }
 }
 
+/// Outcome of an extraction run. `characters` / `stages` are the icons actually
+/// written to disk. The remaining counts are diagnostics: when nothing is
+/// written they reveal *where* parsing fell short (e.g. a Slippi version whose
+/// bundle lays its assets out differently), which is otherwise invisible —
+/// the release build ships with no console to print to.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExtractReport {
+    pub characters: usize,
+    pub stages: usize,
+    pub asset_modules: usize,
+    pub char_refs: usize,
+    pub stage_refs: usize,
+}
+
+/// Read a renderer asset by its emitted filename, which may be a bare name or a
+/// `/`-separated relative path (some builds nest assets in a subfolder).
+fn read_renderer_asset(arc: &Asar, file: &str) -> Option<Vec<u8>> {
+    let mut parts = vec!["dist", "renderer"];
+    parts.extend(file.split('/').filter(|s| !s.is_empty()));
+    arc.read(&parts)
+}
+
 /// Extract character + stage icons from the local Slippi install into
 /// `dest/characters` and `dest/stages`, named to match [`CHARACTERS`] /
-/// [`STAGES`]. Returns `(characters, stages)` written. Errors if no Slippi
-/// install is found or its bundle layout is unrecognized.
+/// [`STAGES`]. Returns an [`ExtractReport`] (icons written + parse
+/// diagnostics). Errors if no Slippi install is found or its bundle layout is
+/// unrecognized.
 ///
 /// `launcher_override` is the optional manual path from Settings; when set and
 /// resolvable it wins over auto-discovery, otherwise we fall back to the
 /// standard per-OS install locations.
-pub fn extract_to(dest: &Path, launcher_override: Option<&Path>) -> Result<(usize, usize)> {
+pub fn extract_to(dest: &Path, launcher_override: Option<&Path>) -> Result<ExtractReport> {
     let asar_path = launcher_override
         .and_then(resolve_launcher_override)
         .or_else(find_asar)
@@ -319,7 +350,7 @@ pub fn extract_to(dest: &Path, launcher_override: Option<&Path>) -> Result<(usiz
 
     let copy = |module_id: &str, dest: PathBuf| -> bool {
         match mod_to_file.get(module_id) {
-            Some(file) => match arc.read(&["dist", "renderer", file]) {
+            Some(file) => match read_renderer_asset(&arc, file) {
                 Some(data) => fs::write(dest, data).is_ok(),
                 None => false,
             },
@@ -354,7 +385,13 @@ pub fn extract_to(dest: &Path, launcher_override: Option<&Path>) -> Result<(usiz
         }
     }
 
-    Ok((n_char, n_stage))
+    Ok(ExtractReport {
+        characters: n_char,
+        stages: n_stage,
+        asset_modules: mod_to_file.len(),
+        char_refs: char_ctx.len(),
+        stage_refs: stage_ctx.len(),
+    })
 }
 
 #[cfg(test)]
@@ -371,9 +408,17 @@ mod tests {
         }
         let tmp = std::env::temp_dir().join(format!("stats-melee-icontest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
-        let (chars, stages) = extract_to(&tmp, None).expect("extraction should succeed");
-        assert!(chars >= 20, "expected most character icons, got {chars}");
-        assert!(stages >= 15, "expected most stage icons, got {stages}");
+        let report = extract_to(&tmp, None).expect("extraction should succeed");
+        assert!(
+            report.characters >= 20,
+            "expected most character icons, got {}",
+            report.characters
+        );
+        assert!(
+            report.stages >= 15,
+            "expected most stage icons, got {}",
+            report.stages
+        );
         // A known icon should be a real PNG.
         let falco = fs::read(tmp.join("characters/Falco.png")).expect("Falco.png written");
         assert_eq!(&falco[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");

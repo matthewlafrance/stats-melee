@@ -50,12 +50,17 @@ the license, and an `assets/` folder — see [Icons](#icons) below).
   remove programs*. Prefer no installer? Use the `…-windows-msvc.zip` and run
   `stats-melee-app.exe` directly. Either way SmartScreen may warn on first run
   (the app is unsigned): **More info → Run anyway**.
-- **macOS** — open the **`.dmg`** and drag **stats-melee** to Applications.
-  The app is ad-hoc signed but not notarized (no paid Apple Developer cert), so
-  the first launch needs a right-click → **Open** (or *System Settings →
-  Privacy & Security → Open Anyway*) to get past Gatekeeper. If macOS instead
-  says the app **"is damaged and can't be opened,"** that's the download
-  quarantine flag — clear it once and it'll open normally:
+- **macOS** — the app is ad-hoc signed but **not notarized** (no paid Apple
+  Developer cert), so the first launch needs a one-time approval:
+  1. Open the **`.dmg`** and **drag `stats-melee` into Applications.** Don't run
+     it from the DMG window — apps launched from a mounted disk image hang.
+  2. Double-click it in Applications. macOS will block it the first time.
+  3. Open **System Settings → Privacy & Security**, scroll to the bottom, and
+     click **Open Anyway** next to `stats-melee`. After this it launches normally
+     forever.
+
+  If macOS instead says the app **"is damaged and can't be opened,"** that's the
+  download quarantine flag; clear it once in Terminal and reopen:
 
   ```sh
   xattr -dr com.apple.quarantine /Applications/stats-melee.app

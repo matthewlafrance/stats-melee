@@ -248,7 +248,7 @@ pub struct StatsMeleeApp {
 
     /// Result of the most recent Settings "Re-extract icons from Slippi"
     /// click — `(characters, stages)` on success, else an error message.
-    last_icon_extract: Option<Result<(usize, usize), String>>,
+    last_icon_extract: Option<Result<crate::slippi_icons::ExtractReport, String>>,
 
     /// Persistent file-backed cache for [`ReplayAnalysis`] keyed on
     /// each .slp's content hash. Constructed once at app startup; the
@@ -940,9 +940,9 @@ impl StatsMeleeApp {
         let launcher_override = self.config.slippi_launcher_path.as_deref();
         self.last_icon_extract = Some(match crate::slippi_icons::extract_to(&dest, launcher_override)
         {
-            Ok((c, s)) => {
+            Ok(report) => {
                 self.icons.clear();
-                Ok((c, s))
+                Ok(report)
             }
             Err(e) => Err(e.to_string()),
         });
@@ -2630,9 +2630,27 @@ impl StatsMeleeApp {
         }
         if let Some(result) = &self.last_icon_extract {
             match result {
-                Ok((c, s)) => ui.colored_label(
+                // Found Slippi and parsed its bundle, but resolved no icons —
+                // almost always a Slippi version whose asset layout differs.
+                // Show the parse breakdown (it's the only diagnostic the
+                // console-less release build can surface) and note the badge
+                // fallback so the green count isn't mistaken for success.
+                Ok(r) if r.characters == 0 && r.stages == 0 => ui.colored_label(
+                    egui::Color32::from_rgb(210, 160, 60),
+                    format!(
+                        "⚠ Found Slippi but matched 0 icons (asset modules: {}, \
+                         character refs: {}, stage refs: {}). Your Slippi version's \
+                         icon layout may differ — using badge fallbacks. Please \
+                         report these numbers.",
+                        r.asset_modules, r.char_refs, r.stage_refs
+                    ),
+                ),
+                Ok(r) => ui.colored_label(
                     egui::Color32::from_rgb(90, 180, 100),
-                    format!("✓ Extracted {c} character + {s} stage icons from Slippi."),
+                    format!(
+                        "✓ Extracted {} character + {} stage icons from Slippi.",
+                        r.characters, r.stages
+                    ),
                 ),
                 Err(e) => ui.colored_label(
                     egui::Color32::from_rgb(220, 80, 80),
@@ -2862,9 +2880,10 @@ fn ensure_slippi_icons(launcher_override: Option<&Path>) {
         return;
     }
     match crate::slippi_icons::extract_to(&dest, launcher_override) {
-        Ok((c, s)) => eprintln!(
-            "stats-melee: extracted {c} character + {s} stage icons from Slippi into {}",
-            dest.display()
+        Ok(r) => eprintln!(
+            "stats-melee: extracted {} character + {} stage icons from Slippi into {} \
+             (asset modules: {}, char refs: {}, stage refs: {})",
+            r.characters, r.stages, dest.display(), r.asset_modules, r.char_refs, r.stage_refs
         ),
         Err(e) => eprintln!("stats-melee: Slippi icon extraction skipped ({e})"),
     }
