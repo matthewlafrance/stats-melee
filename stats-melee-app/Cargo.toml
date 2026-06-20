@@ -50,3 +50,13 @@ anyhow = "1"
 # Version + features kept in sync with stats-melee so Cargo unifies to a
 # single instance.
 diesel = { version = "2.2.0", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+
+# Render the procedural app icon into per-OS assets at build time (see
+# build.rs). `png` (used for the macOS iconset + Linux launcher icon) is needed
+# on every host; the Windows-only `.exe` embed pulls `ico` + `winresource`.
+[build-dependencies]
+png = "0.17"
+
+[target.'cfg(windows)'.build-dependencies]
+ico = "0.3"
+winresource = "0.1"

@@ -3,7 +3,7 @@
 //! Owns the app-wide state — config, DB connection, cached replay rows —
 //! and delegates rendering of each page to an inline method.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
@@ -314,7 +314,7 @@ impl StatsMeleeApp {
         // First launch: rip character / stage icons from a local Slippi install
         // into the writable assets dir so the library/viewer show real art
         // instead of badges. One-shot, best-effort, off the render path.
-        ensure_slippi_icons();
+        ensure_slippi_icons(config.slippi_launcher_path.as_deref());
         // If onboarding is needed, default to Settings so the first thing
         // the user sees is the "pick replay folder" widget.
         let page = if config.needs_onboarding() {
@@ -507,6 +507,20 @@ impl StatsMeleeApp {
             .pick_file()
         {
             self.config.slippi_playback_command = Some(path.display().to_string());
+            self.save_config();
+        }
+    }
+
+    /// Open a native file/folder picker for the Slippi Launcher install,
+    /// used as the manual source for icon ripping when auto-discovery misses.
+    /// We pick a folder (the install dir or the `.app` bundle); the resolver
+    /// finds the `app.asar` inside. Cancelling leaves the current value.
+    fn pick_slippi_launcher(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Pick your Slippi Launcher install folder")
+            .pick_folder()
+        {
+            self.config.slippi_launcher_path = Some(path);
             self.save_config();
         }
     }
@@ -923,7 +937,9 @@ impl StatsMeleeApp {
                 return;
             }
         };
-        self.last_icon_extract = Some(match crate::slippi_icons::extract_to(&dest) {
+        let launcher_override = self.config.slippi_launcher_path.as_deref();
+        self.last_icon_extract = Some(match crate::slippi_icons::extract_to(&dest, launcher_override)
+        {
             Ok((c, s)) => {
                 self.icons.clear();
                 Ok((c, s))
@@ -2425,6 +2441,8 @@ impl StatsMeleeApp {
         let mut melee_iso_save_pending = false;
         let mut melee_iso_pick_clicked = false;
         let mut icon_extract_clicked = false;
+        let mut slippi_launcher_pick_clicked = false;
+        let mut slippi_launcher_clear_clicked = false;
 
         egui::Grid::new("settings_grid")
             .num_columns(2)
@@ -2531,17 +2549,45 @@ impl StatsMeleeApp {
                 });
                 ui.end_row();
 
-                // Melee ISO — Slippi Dolphin needs the game disc image to
-                // boot a replay, so "Open in Slippi" passes this to Dolphin.
+                // Slippi Launcher path — manual override for the icon source.
+                // The app auto-finds the Launcher's bundle on first launch;
+                // this is the escape hatch when that fails (non-standard
+                // install dir), so icon ripping never hard-fails.
+                ui.label("Slippi Launcher path").on_hover_text(
+                    "Only needed if icon extraction can't find Slippi \
+                     automatically. Point this at your Slippi Launcher install \
+                     folder (or the app.asar inside it); leave unset to \
+                     auto-detect.",
+                );
+                ui.horizontal(|ui| {
+                    let display = match &self.config.slippi_launcher_path {
+                        Some(p) => p.display().to_string(),
+                        None => "(auto-detect)".to_string(),
+                    };
+                    ui.label(display);
+                    if ui.button("Browse…").clicked() {
+                        slippi_launcher_pick_clicked = true;
+                    }
+                    if self.config.slippi_launcher_path.is_some() && ui.button("Clear").clicked() {
+                        slippi_launcher_clear_clicked = true;
+                    }
+                });
+                ui.end_row();
+
+                // Melee ISO — optional. Slippi Dolphin already has a default
+                // ISO from the Launcher, so playback works without this; we
+                // only pass `-e <iso>` when it's set (override / no-default
+                // Dolphin). See crate::slippi.
                 ui.label("Melee ISO").on_hover_text(
-                    "Path to your Super Smash Bros. Melee 1.02 NTSC ISO. \
-                     Needed to play replays in Slippi ('Open in Slippi' on \
-                     the viewer page); browsing and stats work without it.",
+                    "Optional. Path to your Super Smash Bros. Melee 1.02 NTSC \
+                     ISO. Usually unnecessary — a Dolphin installed via the \
+                     Slippi Launcher already has a default ISO, so replays play \
+                     without it. Set it only as an override.",
                 );
                 ui.horizontal(|ui| {
                     let display = match &self.config.melee_iso_path {
                         Some(p) => p.display().to_string(),
-                        None => "(not set)".to_string(),
+                        None => "(optional — using Slippi's default)".to_string(),
                     };
                     ui.label(display);
                     if ui.button("Browse…").clicked() {
@@ -2569,6 +2615,13 @@ impl StatsMeleeApp {
         }
         if icon_extract_clicked {
             self.reextract_icons();
+        }
+        if slippi_launcher_pick_clicked {
+            self.pick_slippi_launcher();
+        }
+        if slippi_launcher_clear_clicked {
+            self.config.slippi_launcher_path = None;
+            self.save_config();
         }
 
         ui.add_space(16.0);
@@ -2797,7 +2850,7 @@ fn open_analysis_cache() -> anyhow::Result<AnalysisCache> {
 /// just leave the drawn-badge fallback in place. Re-runs (cheaply, hitting the
 /// no-Slippi path fast) only while the dir stays empty, so installing Slippi
 /// later still gets picked up on a subsequent launch.
-fn ensure_slippi_icons() {
+fn ensure_slippi_icons(launcher_override: Option<&Path>) {
     let Ok(dest) = AppConfig::default_assets_dir() else {
         return;
     };
@@ -2808,7 +2861,7 @@ fn ensure_slippi_icons() {
     if already {
         return;
     }
-    match crate::slippi_icons::extract_to(&dest) {
+    match crate::slippi_icons::extract_to(&dest, launcher_override) {
         Ok((c, s)) => eprintln!(
             "stats-melee: extracted {c} character + {s} stage icons from Slippi into {}",
             dest.display()

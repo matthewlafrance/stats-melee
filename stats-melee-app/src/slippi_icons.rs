@@ -100,15 +100,24 @@ fn asar_candidates() -> Vec<PathBuf> {
         out.push(base.join("app-arm64.asar"));
         out.push(base.join("app-x64.asar"));
     } else if cfg!(target_os = "windows") {
+        // electron-builder's NSIS installer defaults to a per-user install
+        // under %LOCALAPPDATA%\Programs; a machine-wide (admin) install lands
+        // in Program Files instead. Cover both, and pair each `resources` dir
+        // with the multi-arch asar names electron may emit.
+        let mut roots: Vec<PathBuf> = Vec::new();
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            for dir in ["slippi-launcher", "Slippi Launcher"] {
-                out.push(
-                    Path::new(&local)
-                        .join("Programs")
-                        .join(dir)
-                        .join("resources")
-                        .join("app.asar"),
-                );
+            for dir in ["Slippi Launcher", "slippi-launcher"] {
+                roots.push(Path::new(&local).join("Programs").join(dir).join("resources"));
+            }
+        }
+        for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+            if let Ok(pf) = std::env::var(var) {
+                roots.push(Path::new(&pf).join("Slippi Launcher").join("resources"));
+            }
+        }
+        for root in roots {
+            for name in ["app.asar", "app-x64.asar", "app-arm64.asar"] {
+                out.push(root.join(name));
             }
         }
     } else if let Ok(home) = std::env::var("HOME") {
@@ -124,6 +133,39 @@ fn asar_candidates() -> Vec<PathBuf> {
 /// The first existing Slippi `app.asar`, if any install is present.
 pub fn find_asar() -> Option<PathBuf> {
     asar_candidates().into_iter().find(|p| p.is_file())
+}
+
+/// Resolve a user-supplied Slippi *Launcher* path (from Settings) to its
+/// `app.asar`. Auto-discovery covers the standard install locations; this is
+/// the manual escape hatch for non-standard installs the probes miss.
+///
+/// Accepts whatever a file picker is likely to return: the `app.asar` file
+/// itself, a `.app` bundle (macOS), the install directory, or its `resources`
+/// subfolder. Returns `None` if no `.asar` can be found under it.
+pub fn resolve_launcher_override(path: &Path) -> Option<PathBuf> {
+    // Already pointing straight at an `.asar` file — take it as-is.
+    if path.is_file() {
+        return (path.extension().is_some_and(|e| e == "asar")).then(|| path.to_path_buf());
+    }
+    if !path.is_dir() {
+        return None;
+    }
+    // Roots that might hold the asar, in priority order: the dir itself, a
+    // macOS `.app`'s Contents/Resources, and an install dir's `resources`.
+    let roots = [
+        path.to_path_buf(),
+        path.join("Contents").join("Resources"),
+        path.join("resources"),
+    ];
+    for root in roots {
+        for name in ["app.asar", "app-arm64.asar", "app-x64.asar"] {
+            let cand = root.join(name);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 /// Pull `count` leading ASCII digits off the front of `s`.
@@ -236,8 +278,15 @@ fn parse_chunk(
 /// `dest/characters` and `dest/stages`, named to match [`CHARACTERS`] /
 /// [`STAGES`]. Returns `(characters, stages)` written. Errors if no Slippi
 /// install is found or its bundle layout is unrecognized.
-pub fn extract_to(dest: &Path) -> Result<(usize, usize)> {
-    let asar_path = find_asar().ok_or_else(|| anyhow!("no Slippi Launcher install found"))?;
+///
+/// `launcher_override` is the optional manual path from Settings; when set and
+/// resolvable it wins over auto-discovery, otherwise we fall back to the
+/// standard per-OS install locations.
+pub fn extract_to(dest: &Path, launcher_override: Option<&Path>) -> Result<(usize, usize)> {
+    let asar_path = launcher_override
+        .and_then(resolve_launcher_override)
+        .or_else(find_asar)
+        .ok_or_else(|| anyhow!("no Slippi Launcher install found"))?;
     let arc = Asar::open(&asar_path)?;
 
     let renderer = arc.listdir(&["dist", "renderer"]);
@@ -322,12 +371,42 @@ mod tests {
         }
         let tmp = std::env::temp_dir().join(format!("stats-melee-icontest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
-        let (chars, stages) = extract_to(&tmp).expect("extraction should succeed");
+        let (chars, stages) = extract_to(&tmp, None).expect("extraction should succeed");
         assert!(chars >= 20, "expected most character icons, got {chars}");
         assert!(stages >= 15, "expected most stage icons, got {stages}");
         // A known icon should be a real PNG.
         let falco = fs::read(tmp.join("characters/Falco.png")).expect("Falco.png written");
         assert_eq!(&falco[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn override_resolves_asar_from_install_dir_or_file() {
+        let root =
+            std::env::temp_dir().join(format!("stats-melee-asar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        // A bare install dir with `resources/app.asar` inside resolves to it.
+        let resources = root.join("Slippi Launcher").join("resources");
+        fs::create_dir_all(&resources).expect("mkdir");
+        let asar = resources.join("app.asar");
+        fs::write(&asar, b"x").expect("write asar");
+        assert_eq!(
+            resolve_launcher_override(&root.join("Slippi Launcher")),
+            Some(asar.clone())
+        );
+
+        // Pointing straight at the `.asar` file returns it unchanged.
+        assert_eq!(resolve_launcher_override(&asar), Some(asar));
+
+        // A directory with no asar (and a non-asar file) resolves to None.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).expect("mkdir");
+        assert_eq!(resolve_launcher_override(&empty), None);
+        let stray = root.join("notes.txt");
+        fs::write(&stray, b"x").expect("write");
+        assert_eq!(resolve_launcher_override(&stray), None);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=stats-melee
+GenericName=Melee Replay Stats
+Comment=Browse and analyze your Slippi replays
+Exec=@EXEC@
+Icon=stats-melee
+Terminal=false
+Categories=Game;Utility;
+Keywords=Melee;Slippi;Smash;replay;

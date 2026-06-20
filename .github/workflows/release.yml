@@ -68,12 +68,82 @@ jobs:
             echo "ASSET=${stage}.zip" >> "$GITHUB_ENV"
           else
             cp "target/${{ matrix.target }}/release/stats-melee-app" "$stage/"
+            if [ "${{ runner.os }}" = "Linux" ]; then
+              # Bundle the desktop-integration installer (menu entry + icon)
+              # inside the tarball; build.rs emitted the launcher PNG.
+              cp stats-melee-app/linux/install.sh \
+                 stats-melee-app/linux/uninstall.sh \
+                 stats-melee-app/linux/stats-melee.desktop.in "$stage/"
+              cp "target/${{ matrix.target }}/release/stats-melee.png" "$stage/"
+              chmod +x "$stage/install.sh" "$stage/uninstall.sh"
+            fi
             tar czf "${stage}.tar.gz" "$stage"
             echo "ASSET=${stage}.tar.gz" >> "$GITHUB_ENV"
           fi
+
+      # Windows only: wrap the staged files in a per-user NSIS installer that
+      # creates Start Menu + Desktop shortcuts and an uninstaller. The app
+      # icon is the .ico build.rs drops next to the .exe.
+      - name: Build Windows installer (NSIS)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $root = (Get-Location).Path
+          $stage = Join-Path $root "stats-melee-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
+          $ico = Join-Path $root "target\${{ matrix.target }}\release\app.ico"
+          $setupName = "stats-melee-Setup-${env:GITHUB_REF_NAME}.exe"
+          $setup = Join-Path $root $setupName
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            "/DAPP_VERSION=${env:GITHUB_REF_NAME}" `
+            "/DOUT_FILE=$setup" `
+            "/DSTAGE_DIR=$stage" `
+            "/DAPP_ICON=$ico" `
+            "stats-melee-app\installer\installer.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
+          "SETUP_ASSET=$setupName" >> $env:GITHUB_ENV
+
+      # macOS only: wrap the binary in a .app bundle (icon from the iconset
+      # build.rs emitted) and ship it in a drag-to-Applications .dmg.
+      - name: Build macOS .app + .dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}" # strip leading v for the plist version
+          app="stats-melee.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          iconutil -c icns "target/${{ matrix.target }}/release/AppIcon.iconset" \
+            -o "$app/Contents/Resources/AppIcon.icns"
+          sed "s/@VERSION@/${ver}/g" stats-melee-app/macos/Info.plist \
+            > "$app/Contents/Info.plist"
+          cp "target/${{ matrix.target }}/release/stats-melee-app" "$app/Contents/MacOS/"
+          chmod +x "$app/Contents/MacOS/stats-melee-app"
+          dmgroot="dmgroot-${{ matrix.target }}"
+          rm -rf "$dmgroot"; mkdir -p "$dmgroot"
+          cp -R "$app" "$dmgroot/"
+          ln -s /Applications "$dmgroot/Applications"
+          dmg="stats-melee-${GITHUB_REF_NAME}-${{ matrix.target }}.dmg"
+          hdiutil create -volname "stats-melee" -srcfolder "$dmgroot" \
+            -ov -format UDZO "$dmg"
+          echo "DMG_ASSET=$dmg" >> "$GITHUB_ENV"
 
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET }}
           draft: true # review the assembled release before publishing it
+
+      - name: Attach Windows installer to GitHub Release
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.SETUP_ASSET }}
+          draft: true
+
+      - name: Attach macOS .dmg to GitHub Release
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DMG_ASSET }}
+          draft: true

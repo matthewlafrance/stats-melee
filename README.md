@@ -31,25 +31,35 @@ your machine.
 
 - **macOS, Windows, or Linux.**
 - Your own **Slippi `.slp` replays** (from Slippi netplay or local recording).
-- **To watch replays:** [Slippi Dolphin](https://slippi.gg) installed (the app
-  auto-detects the Slippi Launcher's `playback` build on all three OSes; you
-  can also set the binary path manually in Settings) **and your own legally
-  dumped Melee ISO** (set its path in Settings). Browsing, ingesting, and all
-  the stats work without either — they're only needed for playback.
+- **To watch replays:** [Slippi Dolphin](https://slippi.gg) installed. The app
+  auto-detects the Slippi Launcher's `playback` build on all three OSes (you can
+  also set the binary path manually in Settings). A Dolphin installed via the
+  Slippi Launcher already knows your Melee ISO, so playback just works; the
+  **Melee ISO** field in Settings is optional, only needed as an override or for
+  a Dolphin with no default ISO. Browsing, ingesting, and all the stats need
+  none of this.
 
 ## Install
 
-Grab the archive for your OS from the [Releases](../../releases) page, unpack
-it, and run the binary. The archive contains the executable, this README, the
-license, and an `assets/` folder (see [Icons](#icons) below).
+Grab the download for your OS from the [Releases](../../releases) page. Each OS
+has an easy "app" download and a portable archive (the executable, this README,
+the license, and an `assets/` folder — see [Icons](#icons) below).
 
-- **macOS** — the app is unsigned, so the first launch needs a right-click →
-  **Open** (or *System Settings → Privacy & Security → Open Anyway*) to get
-  past Gatekeeper.
-- **Windows** — SmartScreen may warn on first run: **More info → Run anyway**.
-- **Linux** — `chmod +x stats-melee-app` if needed, then run it. Requires a
-  desktop with the XDG desktop portal (for file dialogs), which is standard on
-  modern distros.
+- **Windows** — run **`stats-melee-Setup-<version>.exe`**. It installs per-user
+  (no admin) and creates Start Menu + Desktop shortcuts; uninstall from *Add or
+  remove programs*. Prefer no installer? Use the `…-windows-msvc.zip` and run
+  `stats-melee-app.exe` directly. Either way SmartScreen may warn on first run
+  (the app is unsigned): **More info → Run anyway**.
+- **macOS** — open the **`.dmg`** and drag **stats-melee** to Applications.
+  Because the app is unsigned, the first launch needs a right-click → **Open**
+  (or *System Settings → Privacy & Security → Open Anyway*) to get past
+  Gatekeeper. A portable `…-apple-darwin.tar.gz` with the raw binary is also
+  available. Pick `aarch64` for Apple Silicon, `x86_64` for Intel Macs.
+- **Linux** — unpack the `…-linux-gnu.tar.gz`. Run `./stats-melee-app`
+  directly, or run **`sh install.sh`** to add it to your application menu with
+  its icon (installs under `~/.local`, no root; `sh uninstall.sh` removes it).
+  Requires a desktop with the XDG desktop portal (for file dialogs), standard
+  on modern distros.
 
 ## Build from source
 
@@ -76,14 +86,14 @@ sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
 local Slippi Launcher install** into its data dir, so the library and viewer
 show real Melee art. The art is Nintendo's, so **nothing ships in the
 download** — you get it from the copy of Slippi you already have. No Slippi
-installed (or it's somewhere unusual)? The app falls back to tinted
-abbreviation badges, so the UI works fine either way.
+installed? The app falls back to tinted abbreviation badges, so the UI works
+fine either way.
 
-It re-rips automatically whenever that icon folder is empty, so to refresh
-after a Slippi update just delete the `assets/` folder in the app's data dir
-(see [Data & config locations](#data--config-locations)) and relaunch. From a
-source checkout you can also run the standalone extractor, which writes into
-`stats-melee-app/assets/`:
+To refresh after a Slippi update, hit **Re-extract from Slippi** in Settings.
+If your Slippi Launcher is installed somewhere the auto-detect misses, point the
+**Slippi Launcher path** field in Settings at the install folder (or its
+`app.asar`) and re-extract. From a source checkout you can also run the
+standalone extractor, which writes into `stats-melee-app/assets/`:
 
 ```sh
 python3 stats-melee-app/scripts/extract-slippi-icons.py   # --asar / --out optional

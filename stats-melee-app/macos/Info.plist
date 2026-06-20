@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Bundle metadata for the macOS .app. @VERSION@ is filled in by the release
+     workflow (the tag with its leading `v` stripped). -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>stats-melee</string>
+  <key>CFBundleDisplayName</key>
+  <string>stats-melee</string>
+  <key>CFBundleExecutable</key>
+  <string>stats-melee-app</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.slippi.stats-melee</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>10.15</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>

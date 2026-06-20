@@ -53,13 +53,22 @@ pub struct AppConfig {
     #[serde(default)]
     pub slippi_playback_command: Option<String>,
 
-    /// Path to the user's Melee 1.02 NTSC ISO. Slippi Dolphin needs the
-    /// game disc image to boot a replay, so "Open in Slippi" passes this
-    /// to Dolphin explicitly. The same ISO already configured inside the
-    /// Slippi Launcher works here.
+    /// Optional manual path to the user's Slippi *Launcher* install (the
+    /// Electron app), used only to rip character / stage icons out of its
+    /// bundle. Accepts the install folder, the `.app` bundle (macOS), or the
+    /// `app.asar` file directly. When `None`, the app auto-discovers it from
+    /// the standard per-OS install locations (see [`crate::slippi_icons`]).
+    #[serde(default)]
+    pub slippi_launcher_path: Option<PathBuf>,
+
+    /// Optional path to the user's Melee 1.02 NTSC ISO. When set, "Open in
+    /// Slippi" passes it to Dolphin (`-e <iso>`) so playback boots the disc
+    /// image explicitly.
     ///
-    /// When `None` / empty, replays still browse and analyze; only
-    /// playback in Slippi is unavailable until it's set.
+    /// Usually unnecessary: a Dolphin installed via the Slippi Launcher
+    /// already has a default ISO in its own config, so replays play without
+    /// setting this. It's only needed as an override, or for a Dolphin that
+    /// has no default ISO configured. Browsing and stats never need it.
     #[serde(default)]
     pub melee_iso_path: Option<PathBuf>,
 }
@@ -160,6 +169,7 @@ mod tests {
         assert!(cfg.user_player_code.is_empty());
         assert!(cfg.db_path.is_none());
         assert!(cfg.slippi_playback_command.is_none());
+        assert!(cfg.slippi_launcher_path.is_none());
         assert!(cfg.melee_iso_path.is_none());
     }
 
@@ -172,6 +182,7 @@ mod tests {
             slippi_playback_command: Some(
                 "/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin".to_string(),
             ),
+            slippi_launcher_path: Some(PathBuf::from("/Applications/Slippi Launcher.app")),
             melee_iso_path: Some(PathBuf::from("/home/user/melee.iso")),
         };
 
@@ -182,6 +193,7 @@ mod tests {
         assert_eq!(parsed.user_player_code, cfg.user_player_code);
         assert_eq!(parsed.db_path, cfg.db_path);
         assert_eq!(parsed.slippi_playback_command, cfg.slippi_playback_command);
+        assert_eq!(parsed.slippi_launcher_path, cfg.slippi_launcher_path);
         assert_eq!(parsed.melee_iso_path, cfg.melee_iso_path);
     }
 
@@ -192,6 +204,7 @@ mod tests {
         assert!(parsed.user_player_code.is_empty());
         assert!(parsed.db_path.is_none());
         assert!(parsed.slippi_playback_command.is_none());
+        assert!(parsed.slippi_launcher_path.is_none());
         assert!(parsed.melee_iso_path.is_none());
     }
 
@@ -204,6 +217,7 @@ mod tests {
         assert_eq!(parsed.user_player_code, "FOX#1");
         assert!(parsed.db_path.is_none());
         assert!(parsed.slippi_playback_command.is_none());
+        assert!(parsed.slippi_launcher_path.is_none());
         assert!(parsed.melee_iso_path.is_none());
     }
 
