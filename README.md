@@ -51,10 +51,18 @@ the license, and an `assets/` folder — see [Icons](#icons) below).
   `stats-melee-app.exe` directly. Either way SmartScreen may warn on first run
   (the app is unsigned): **More info → Run anyway**.
 - **macOS** — open the **`.dmg`** and drag **stats-melee** to Applications.
-  Because the app is unsigned, the first launch needs a right-click → **Open**
-  (or *System Settings → Privacy & Security → Open Anyway*) to get past
-  Gatekeeper. A portable `…-apple-darwin.tar.gz` with the raw binary is also
-  available. Pick `aarch64` for Apple Silicon, `x86_64` for Intel Macs.
+  The app is ad-hoc signed but not notarized (no paid Apple Developer cert), so
+  the first launch needs a right-click → **Open** (or *System Settings →
+  Privacy & Security → Open Anyway*) to get past Gatekeeper. If macOS instead
+  says the app **"is damaged and can't be opened,"** that's the download
+  quarantine flag — clear it once and it'll open normally:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/stats-melee.app
+  ```
+
+  A portable `…-apple-darwin.tar.gz` with the raw binary is also available. Pick
+  `aarch64` for Apple Silicon, `x86_64` for Intel Macs.
 - **Linux** — unpack the `…-linux-gnu.tar.gz`. Run `./stats-melee-app`
   directly, or run **`sh install.sh`** to add it to your application menu with
   its icon (installs under `~/.local`, no root; `sh uninstall.sh` removes it).

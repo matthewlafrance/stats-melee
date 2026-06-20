@@ -119,6 +119,12 @@ jobs:
             > "$app/Contents/Info.plist"
           cp "target/${{ matrix.target }}/release/stats-melee-app" "$app/Contents/MacOS/"
           chmod +x "$app/Contents/MacOS/stats-melee-app"
+          # Ad-hoc sign the bundle. We have no Apple Developer cert (no
+          # notarization), but a coherent signature turns Gatekeeper's hard
+          # "damaged" block into the normal "unverified developer" prompt that
+          # right-click -> Open / "Open Anyway" can get past.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --strict "$app"
           dmgroot="dmgroot-${{ matrix.target }}"
           rm -rf "$dmgroot"; mkdir -p "$dmgroot"
           cp -R "$app" "$dmgroot/"
