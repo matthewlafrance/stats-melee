@@ -851,12 +851,14 @@ mod tests {
         // gets asserted when HOME is set (always true on a real macOS
         // host; CI containers may not set it).
         if std::env::var("HOME").is_ok() {
+            // Match the dir name only (no separators) so the check is
+            // host-OS-agnostic — the paths join with `\` on Windows.
             let playback_idx = candidates
                 .iter()
-                .position(|p| p.to_string_lossy().contains("/playback/"));
+                .position(|p| p.to_string_lossy().contains("playback"));
             let netplay_idx = candidates
                 .iter()
-                .position(|p| p.to_string_lossy().contains("/netplay/"));
+                .position(|p| p.to_string_lossy().contains("netplay"));
             assert!(playback_idx.is_some(), "playback candidate missing");
             assert!(netplay_idx.is_some(), "netplay candidate missing");
             assert!(
@@ -884,10 +886,10 @@ mod tests {
         let dirs = linux_dolphin_dirs();
         std::env::remove_var("XDG_CONFIG_HOME");
         assert_eq!(dirs.len(), 2);
-        assert!(dirs[0]
-            .to_string_lossy()
-            .ends_with("/Slippi Launcher/playback"));
-        assert!(dirs[1].to_string_lossy().ends_with("/Slippi Launcher/netplay"));
+        // Component-wise `Path::ends_with` so the separator matches the host
+        // OS (Windows joins with `\`, which a string `ends_with("/…")` misses).
+        assert!(dirs[0].ends_with("Slippi Launcher/playback"));
+        assert!(dirs[1].ends_with("Slippi Launcher/netplay"));
     }
 
     #[test]
