@@ -53,31 +53,15 @@ pub struct AppConfig {
     #[serde(default)]
     pub slippi_playback_command: Option<String>,
 
-    /// Path to the Melee 1.02 NTSC ISO used by the headless render
-    /// pipeline (Track 10). Same ISO the user already has configured
-    /// inside Slippi Launcher for normal replay viewing — we just
-    /// need it spelled out separately here because the render worker
-    /// passes it to Dolphin as an explicit `--exec=<path>` arg rather
-    /// than relying on Dolphin's recent-files state.
+    /// Path to the user's Melee 1.02 NTSC ISO. Slippi Dolphin needs the
+    /// game disc image to boot a replay, so "Open in Slippi" passes this
+    /// to Dolphin explicitly. The same ISO already configured inside the
+    /// Slippi Launcher works here.
     ///
-    /// When `None` / empty, the "Render video" button on the viewer
-    /// page is disabled with a "set the Melee ISO path in Settings"
-    /// tooltip.
+    /// When `None` / empty, replays still browse and analyze; only
+    /// playback in Slippi is unavailable until it's set.
     #[serde(default)]
     pub melee_iso_path: Option<PathBuf>,
-
-    /// Override path for the `ffmpeg` binary used to mux Dolphin's
-    /// frame + audio dumps into the cached MP4. `None` / empty means
-    /// "whatever's on PATH" — the typical macOS install via
-    /// `brew install ffmpeg` lands at `/opt/homebrew/bin/ffmpeg` and
-    /// is on PATH automatically.
-    ///
-    /// Stored as a `String` rather than `PathBuf` so `Some("ffmpeg")`
-    /// (a bare name to be PATH-resolved) round-trips cleanly through
-    /// TOML. `effective_ffmpeg_command` resolves this to the actual
-    /// `Command::new(...)` argument.
-    #[serde(default)]
-    pub ffmpeg_command: Option<String>,
 }
 
 impl AppConfig {
@@ -138,22 +122,6 @@ impl AppConfig {
         }
     }
 
-    /// The ffmpeg binary the render worker should invoke. Returns the
-    /// trimmed user override if set, otherwise the bare name `"ffmpeg"`
-    /// — `Command::new("ffmpeg")` resolves through `PATH`, which
-    /// matches the brew / package-manager-installed defaults.
-    pub fn effective_ffmpeg_command(&self) -> PathBuf {
-        match self
-            .ffmpeg_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(s) => PathBuf::from(s),
-            None => PathBuf::from("ffmpeg"),
-        }
-    }
-
     // --- TOML-only helpers (pure; unit-testable) -----------------------------
 
     /// Parse TOML text into an `AppConfig`.
@@ -193,31 +161,6 @@ mod tests {
         assert!(cfg.db_path.is_none());
         assert!(cfg.slippi_playback_command.is_none());
         assert!(cfg.melee_iso_path.is_none());
-        assert!(cfg.ffmpeg_command.is_none());
-    }
-
-    #[test]
-    fn effective_ffmpeg_falls_back_to_path_resolution() {
-        // Unset → bare name, lets Command::new("ffmpeg") resolve via PATH.
-        let cfg = AppConfig::default();
-        assert_eq!(cfg.effective_ffmpeg_command(), PathBuf::from("ffmpeg"));
-
-        // Whitespace-only override is treated as unset — same fallback.
-        let cfg = AppConfig {
-            ffmpeg_command: Some("   ".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(cfg.effective_ffmpeg_command(), PathBuf::from("ffmpeg"));
-
-        // Real override wins.
-        let cfg = AppConfig {
-            ffmpeg_command: Some("/opt/homebrew/bin/ffmpeg".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            cfg.effective_ffmpeg_command(),
-            PathBuf::from("/opt/homebrew/bin/ffmpeg")
-        );
     }
 
     #[test]
@@ -230,7 +173,6 @@ mod tests {
                 "/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin".to_string(),
             ),
             melee_iso_path: Some(PathBuf::from("/home/user/melee.iso")),
-            ffmpeg_command: Some("/opt/homebrew/bin/ffmpeg".to_string()),
         };
 
         let toml_text = cfg.to_toml_string().expect("serialize");
@@ -241,7 +183,6 @@ mod tests {
         assert_eq!(parsed.db_path, cfg.db_path);
         assert_eq!(parsed.slippi_playback_command, cfg.slippi_playback_command);
         assert_eq!(parsed.melee_iso_path, cfg.melee_iso_path);
-        assert_eq!(parsed.ffmpeg_command, cfg.ffmpeg_command);
     }
 
     #[test]
@@ -252,7 +193,6 @@ mod tests {
         assert!(parsed.db_path.is_none());
         assert!(parsed.slippi_playback_command.is_none());
         assert!(parsed.melee_iso_path.is_none());
-        assert!(parsed.ffmpeg_command.is_none());
     }
 
     #[test]
@@ -265,7 +205,6 @@ mod tests {
         assert!(parsed.db_path.is_none());
         assert!(parsed.slippi_playback_command.is_none());
         assert!(parsed.melee_iso_path.is_none());
-        assert!(parsed.ffmpeg_command.is_none());
     }
 
     #[test]

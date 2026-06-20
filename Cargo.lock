@@ -3636,7 +3636,6 @@ dependencies = [
  "serde",
  "serde_json",
  "stats-melee",
- "tempfile",
  "toml 0.8.23",
 ]
 

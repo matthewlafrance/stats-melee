@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use stats_melee::testing::{fixture_slps, TestDb};
+use stats_melee::testing::{fixture_slps_or_skip, TestDb};
 use stats_melee::{
     avg_punish_length_by_code, get_punishes_for_game, most_common_kill_moves_by_code,
     openings_per_kill_by_code, parse_single_replay, post_game,
@@ -17,7 +17,9 @@ use stats_melee::{
 #[test]
 fn punishes_ingest_and_satisfy_invariants() {
     let mut db = TestDb::new().expect("tempdir db");
-    let fixtures = fixture_slps().expect("fixture listing");
+    let Some(fixtures) = fixture_slps_or_skip() else {
+        return;
+    };
     assert!(fixtures.len() >= 5, "need at least 5 fixtures");
 
     // Keep the target-code as the code that appears in the most games — it's
@@ -214,7 +216,9 @@ fn punishes_ingest_and_satisfy_invariants() {
 #[test]
 fn repeated_ingestion_yields_matching_punish_counts() {
     let mut db = TestDb::new().expect("tempdir db");
-    let fixtures = fixture_slps().expect("fixture listing");
+    let Some(fixtures) = fixture_slps_or_skip() else {
+        return;
+    };
 
     // Find the first fixture that's 1v1 and has at least one punish.
     for slp in fixtures.iter().take(20) {

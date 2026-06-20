@@ -4,7 +4,7 @@ use peppi::io::slippi;
 use std::{fs, io};
 
 use stats_melee::advanced::compute_advanced_stats_1v1;
-use stats_melee::testing::fixture_slps;
+use stats_melee::testing::fixture_slps_or_skip;
 
 fn parse_peppi(path: &std::path::Path) -> peppi::game::immutable::Game {
     let mut r = io::BufReader::new(fs::File::open(path).expect("open"));
@@ -17,7 +17,10 @@ fn parse_peppi(path: &std::path::Path) -> peppi::game::immutable::Game {
 /// percents are in a sane melee range.
 #[test]
 fn advanced_stats_are_self_consistent_on_fixtures() {
-    let slps = fixture_slps().expect("fixtures");
+    // The fixture corpus is local-only (gitignored); skip when it's absent.
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
     assert!(slps.len() >= 5, "need >=5 fixtures");
 
     let mut checked = 0usize;

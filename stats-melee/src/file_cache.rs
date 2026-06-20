@@ -1,22 +1,13 @@
 //! Generic byte-keyed file cache for derived artifacts.
 //!
-//! This is the shared storage substrate for two consumers with very
-//! different policies:
-//!
-//! - **Video cache** (Track 10b): aggressive — small `max_entries` cap,
-//!   multi-GB byte budget, `prune_on_drop = true` so the app's shutdown
-//!   handler wipes the dir. MP4s are too big and too rarely re-watched
-//!   in a single session to justify keeping them around.
-//! - **Analysis cache** (Track 11): persistent — generous byte budget,
-//!   no entry cap, `prune_on_drop = false`. Combat-state vectors are
-//!   tens of KB; keeping the user's entire viewing history is realistic
-//!   at hundreds of MB total. The whole point is "the second view is
-//!   instant, even after an app restart".
-//!
-//! The split is realized at the wrapper layer ([`crate::video_cache`],
-//! [`crate::analysis_cache`] when they land); this module just gives
-//! both wrappers the same storage primitives so eviction semantics
-//! stay consistent across cache kinds.
+//! Storage substrate behind [`crate::analysis_cache`]: a budgeted,
+//! LRU-evicting store of derived blobs keyed by the source's content hash.
+//! Combat-state vectors are tens of KB, so a generous byte budget with no
+//! entry cap and `prune_on_drop = false` keeps the user's entire viewing
+//! history on disk — the point is that the second view of any replay is
+//! instant, even after an app restart. The wrapper layer
+//! ([`crate::analysis_cache`]) owns the policy; this module just provides
+//! the storage primitives and eviction semantics.
 //!
 //! # Concurrency
 //!

@@ -24,9 +24,9 @@ diesel::table! {
         // writes this column explicitly.
         ingested_at -> Text,
         // Hex-encoded SHA-256 of the .slp file's bytes. Cache key for
-        // the analysis sidecar (Track 11). Nullable for backward compat
-        // with rows ingested before the column existed and for tests
-        // that synthesize GameData without a backing file.
+        // the analysis sidecar. Nullable for backward compat with rows
+        // ingested before the column existed and for tests that
+        // synthesize GameData without a backing file.
         content_hash -> Nullable<Text>,
         // ISO-8601 timestamp of when the game was PLAYED, from the Slippi
         // metadata `startAt`. Distinct from `ingested_at`. Nullable for

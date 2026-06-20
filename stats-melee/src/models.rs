@@ -20,7 +20,7 @@ pub struct Game {
     /// `DEFAULT CURRENT_TIMESTAMP` — callers never write it.
     pub ingested_at: String,
     /// Hex-encoded SHA-256 of the .slp file's bytes, computed at
-    /// ingestion. Cache key for the analysis sidecar (Track 11).
+    /// ingestion. Cache key for the analysis sidecar.
     /// `None` for rows ingested before the column existed and for
     /// tests that synthesize a `GameData` without a backing file.
     pub content_hash: Option<String>,
@@ -93,7 +93,7 @@ pub struct NewGame<'a> {
     pub replay_path: Option<&'a str>,
     /// `None` for tests / non-file-backed inserts. Real ingestion
     /// passes `Some(<hex SHA-256>)` so the analysis sidecar cache
-    /// (Track 11) has a stable key.
+    /// has a stable key.
     pub content_hash: Option<&'a str>,
     /// ISO-8601 play timestamp from the .slp metadata `startAt`, or
     /// `None` when absent.

@@ -53,8 +53,8 @@ pub static STAGES: [&str; 33] = [
 ///     across the cast.
 ///   - 23..=49 and 72+: character-specific — Falcon Punch and Fox's
 ///     up-special live at the same id but mean different things. These
-///     return `None` here; Track 8d will layer a (character_id, attack_id)
-///     lookup on top once kill-move stats are character-gated.
+///     return `None` here, since resolving them needs a (character_id,
+///     attack_id) lookup.
 ///
 /// Names are the user-facing form ("down air", "forward tilt"), not the
 /// internal action-state names ("ATTACK_AIR_LW", "ATTACK_LW3"). They render
@@ -576,9 +576,8 @@ mod tests {
     #[test]
     fn attack_name_returns_none_for_character_specific_ids() {
         // 23..=49 is the character-specific band (Falcon Punch et al);
-        // we deliberately don't name those here — Track 8d will layer a
-        // (character_id, attack_id) lookup on top once kill-move stats
-        // are character-gated.
+        // these aren't named in the universal table — resolving them
+        // needs a (character_id, attack_id) lookup.
         for id in [23, 24, 30, 40, 49] {
             assert!(
                 attack_name(id).is_none(),

@@ -2,18 +2,16 @@
 
 use stats_melee::gamedata::{CHARACTERS, STAGES};
 use stats_melee::parse_single_replay;
-use stats_melee::testing::{fixture_slps, fixtures_dir};
+use stats_melee::testing::fixture_slps_or_skip;
 
 /// Sanity-check: every bundled fixture should parse without error. This is the
 /// cheapest regression test against peppi upgrades and parser bugs.
 #[test]
 fn every_fixture_parses() {
-    let slps = fixture_slps().expect("failed to list fixtures");
-    assert!(
-        !slps.is_empty(),
-        "no .slp fixtures found under {:?} — is the test_slps/ directory populated?",
-        fixtures_dir()
-    );
+    // The fixture corpus is local-only (gitignored); skip when it's absent.
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
 
     let mut failures = Vec::new();
     for slp in &slps {
@@ -36,7 +34,9 @@ fn every_fixture_parses() {
 /// against a peppi metadata-shape change that would silently null it out.
 #[test]
 fn fixtures_carry_played_date() {
-    let slps = fixture_slps().expect("failed to list fixtures");
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
     let mut with_date = 0usize;
     for slp in &slps {
         let gd = parse_single_replay(slp)
@@ -62,7 +62,9 @@ fn fixtures_carry_played_date() {
 /// 1v1), a stage index within the known range, and a non-negative duration.
 #[test]
 fn parsed_fixtures_have_sane_invariants() {
-    let slps = fixture_slps().expect("failed to list fixtures");
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
 
     for slp in slps {
         let gd = parse_single_replay(&slp)
@@ -106,7 +108,9 @@ fn parsed_fixtures_have_sane_invariants() {
 /// winner slot is populated whenever any slot is.
 #[test]
 fn winner_slot_populated_when_any_player_is() {
-    let slps = fixture_slps().expect("failed to list fixtures");
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
 
     for slp in slps {
         let gd = parse_single_replay(&slp)
@@ -128,7 +132,9 @@ fn winner_slot_populated_when_any_player_is() {
 /// stocks value should be 0..=4 for a normal melee game.
 #[test]
 fn stocks_remaining_populated_and_sane() {
-    let slps = fixture_slps().expect("failed to list fixtures");
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
 
     let mut checked = 0usize;
     let mut slots_with_player = 0usize;

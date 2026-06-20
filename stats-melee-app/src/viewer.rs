@@ -1,11 +1,5 @@
-//! Replay-viewer page: per-game detail view with a colored combat-state
-//! scrub bar.
-//!
-//! The embedded 2D stage view was removed — we're pivoting to an
-//! in-house video pipeline (see Track 10) that will render an actual
-//! Melee replay. The scrub bar survives the rip-out because it's going
-//! to overlay the video once playback lands; for now it renders as a
-//! non-interactive timeline visualization of combat state over time.
+//! Replay-viewer page: per-game detail view with a non-interactive
+//! combat-state timeline ("scrub bar") of advantage state over the match.
 //!
 //! Lifecycle:
 //! 1. User clicks "View" on a row in the library table.
@@ -217,9 +211,9 @@ impl ViewerState {
 /// still show the metadata header.
 ///
 /// `cache` is consulted before re-parsing the .slp from disk. The
-/// game's `content_hash` column (Track 11d) is the cache key — rows
-/// ingested before that column existed always miss the cache and fall
-/// through to the slow path.
+/// game's `content_hash` column is the cache key — rows ingested before
+/// that column existed always miss the cache and fall through to the
+/// slow path.
 ///
 /// `user_player_code`, when `Some`, is matched against the loaded
 /// players to set [`ViewerState::user_perspective`]. The scrub bar
@@ -546,9 +540,8 @@ fn compute_user_perspective(
 ///   - **Hash present + cache hit:** zero-cost, returns instantly.
 ///   - **Hash present + cache miss:** parse .slp, write the result
 ///     back to the cache before returning. Next call hits.
-///   - **No hash (legacy row, ingested before Track 11d):** parse
-///     from disk every time, no cache write — there's no stable key
-///     to write under.
+///   - **No hash (legacy row with no content hash):** parse from disk
+///     every time, no cache write — there's no stable key to write under.
 fn derive_analysis(
     replay_path: &str,
     content_hash: Option<&str>,
@@ -616,11 +609,8 @@ fn user_palette(perspective: Option<UserPerspective>) -> (egui::Color32, egui::C
 }
 
 /// Render the full viewer page. Caller is responsible for the heading +
-/// nav controls; this draws the body: metadata → combat-state scrub bar.
-///
-/// Playback + embedded video land in Track 10; today this is a static
-/// overview with the scrub bar as a timeline visualization. When video
-/// arrives the scrub bar becomes click-to-seek and gains a playhead.
+/// nav controls; this draws the body: metadata → head-to-head →
+/// combat-state timeline.
 pub fn render_viewer(ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, state: &ViewerState) {
     render_match_header(ui, icons, state);
     ui.add_space(16.0);
@@ -671,7 +661,7 @@ fn render_match_header(ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, s
     }
 
     let you = user_port(state);
-    let mut draw_player = |ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, p: &ViewerPlayer| {
+    let draw_player = |ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, p: &ViewerPlayer| {
         crate::icons::character_icon(ui, icons, p.character_id, 30.0);
         ui.add_space(8.0);
         ui.vertical(|ui| {
@@ -933,10 +923,7 @@ fn intro_blurb(perspective: Option<UserPerspective>) -> &'static str {
 }
 
 /// Draw the colored combat-state bar across the full available width.
-///
-/// Today this is a pure visualization — no click-to-seek, no playhead.
-/// Both will return when the embedded video widget lands (Track 10f)
-/// and the bar has a playback time to sync against.
+/// A pure visualization — no click-to-seek, no playhead.
 ///
 /// Each horizontal pixel corresponds to a range of frames in `states`
 /// (same pixel count per frame when the game is longer than the bar,

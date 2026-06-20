@@ -2,12 +2,8 @@
 //!
 //! A "punish" is a run of frames where one player (the attacker) kept the
 //! other (the victim) in or returning to hitstun, with only brief breaks.
-//! Consumers downstream:
-//! - `openings_per_kill_by_code` (Track 2 aggregates)
-//! - `avg_punish_length_by_code`  (Track 2 aggregates)
-//! - `most_common_kill_moves_by_code` (Track 2 aggregates)
-//! - Kill-confirm stats dashboard (Track 4)
-//! - Punish-tree visualization (Track 4)
+//! Punishes back the per-code aggregates: `openings_per_kill_by_code`,
+//! `avg_punish_length_by_code`, and `most_common_kill_moves_by_code`.
 //!
 //! ## Algorithm
 //!

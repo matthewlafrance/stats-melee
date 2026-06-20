@@ -3,7 +3,7 @@
 //! Owns the app-wide state — config, DB connection, cached replay rows —
 //! and delegates rendering of each page to an inline method.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
@@ -14,35 +14,13 @@ use egui_extras::{Column, TableBuilder};
 use stats_melee::analysis_cache::{AnalysisCache, AnalysisCacheConfig};
 use stats_melee::combat::CombatV2Config;
 use stats_melee::gamedata::{spaced_name, CHARACTERS, STAGES};
-use stats_melee::video_cache::{VideoCache, VideoCacheConfig};
 use stats_melee::analytics::{WinAnalytics, WinProportion};
 use stats_melee::{PlayerSummary, PlayerSummaryFilter};
 
 use crate::config::AppConfig;
-use crate::render_worker::{self, RenderMsg, RenderRequest};
 use crate::replay_list::{self, ReplayRow, SortDirection, SortKey};
 use crate::slippi;
 use crate::viewer::{self, ViewerState};
-
-/// Toggle for the in-house render-video pipeline (Tracks 10 & 12).
-///
-/// Set to `false`: the in-house render pipeline (Track 12's
-/// `.slp → DTM → vanilla Dolphin → ffmpeg → MP4`) is parked while we
-/// ship a production version built around the Slippi launcher alone
-/// (the "▶ Open in Slippi" button, which plays replays directly in the
-/// user's Slippi Dolphin install). The DTM/boot-nav work still has open
-/// bugs — see TODO.txt and the Track 12 docs — so it's gated off rather
-/// than removed. With the gate off:
-/// - The "Render video" / "Open video" buttons disappear from the
-///   viewer page nav bar.
-/// - The Melee ISO + ffmpeg override rows disappear from Settings.
-/// - The render-state fields (`render_rx`, `render_status`, etc.)
-///   stay on the app struct (they're cheap and removing them would
-///   churn the constructor + tests).
-/// - The render worker module compiles unchanged; flipping this back
-///   to `true` re-enables the entire pipeline without further code
-///   changes.
-const RENDER_VIDEO_FEATURE_ENABLED: bool = false;
 
 // === Melee palette ===========================================================
 // A single fixed dark theme inspired by the Melee title screen: a deep
@@ -156,7 +134,7 @@ pub struct StatsMeleeApp {
     /// Receiver for the in-flight ingestion worker, if one is
     /// running. `Some` exactly when a scan thread has been spawned
     /// and we haven't yet drained its `Done` message. Same pattern
-    /// as `summary_rx` / `render_rx`.
+    /// as `summary_rx`.
     ingest_rx: Option<mpsc::Receiver<IngestMsg>>,
     /// True while the ingest worker is in flight. Mirrors
     /// `ingest_rx.is_some()` but makes the UI's button-disabled +
@@ -276,35 +254,8 @@ pub struct StatsMeleeApp {
     /// each .slp's content hash. Constructed once at app startup; the
     /// viewer's load path consults it before re-parsing peppi, which
     /// turns the second view of any replay from a ~1s blocking parse
-    /// into an instant DB-style read. See [`AnalysisCache`] +
-    /// `Track 11` in TODO.txt for the full rationale.
+    /// into an instant DB-style read. See [`AnalysisCache`].
     analysis_cache: AnalysisCache,
-
-    /// Aggressive file-backed cache for rendered MP4s, keyed on the
-    /// .slp content hash. Constructed once at startup; wiped on Drop
-    /// so the multi-GB videos don't accumulate across sessions.
-    /// `Track 10` in TODO.txt for the full policy contrast against
-    /// the analysis cache.
-    video_cache: VideoCache,
-    /// Receiver for the in-flight render worker, if one is running.
-    /// `Some` exactly when a render thread has been spawned and we
-    /// haven't yet drained its `Done` message. Mirrors
-    /// `summary_rx`/`summary_loading` for the analytics worker.
-    render_rx: Option<mpsc::Receiver<RenderMsg>>,
-    /// `Some(hash)` while a render is in flight — the .slp content
-    /// hash the worker is producing an MP4 for. We need this on the
-    /// app side so `poll_render_worker` can call
-    /// `video_cache.finalize(hash)` once the worker is done. Cleared
-    /// alongside `render_rx`.
-    render_in_flight_hash: Option<String>,
-    /// Most recent progress message from the render worker, displayed
-    /// next to a spinner on the viewer page. `None` outside of an
-    /// active render.
-    render_status: Option<String>,
-    /// Status of the most recently completed render — `Ok(path)` to
-    /// the cached MP4 on success, `Err(message)` on failure. Cleared
-    /// when the user navigates to a different replay.
-    last_render_summary: Option<Result<PathBuf, String>>,
 
     /// Lazily-populated GPU-texture cache for character + stage icons,
     /// with a drawn-badge fallback when no PNG asset is present. See
@@ -395,16 +346,6 @@ impl StatsMeleeApp {
             .expect("tempdir-rooted fallback cache should always open")
         });
 
-        // Same shape for the video cache — but with the aggressive
-        // "wipe on close" policy; see `VideoCacheConfig::default`.
-        // Tempdir fallback for the same reason.
-        let video_cache = open_video_cache().unwrap_or_else(|e| {
-            eprintln!("stats-melee: video cache disabled: {e}");
-            let dir = std::env::temp_dir().join("stats-melee-video-fallback");
-            VideoCache::open(dir, VideoCacheConfig::default())
-                .expect("tempdir-rooted fallback video cache should always open")
-        });
-
         Self {
             page,
             config,
@@ -447,11 +388,6 @@ impl StatsMeleeApp {
             last_slippi_launch: None,
             last_icon_extract: None,
             analysis_cache,
-            video_cache,
-            render_rx: None,
-            render_in_flight_hash: None,
-            render_status: None,
-            last_render_summary: None,
             icons: crate::icons::IconCache::default(),
         }
     }
@@ -462,13 +398,6 @@ impl StatsMeleeApp {
     /// [`Self::nuke_replays`] at row-scope. Called from the per-row
     /// "Confirm?" button on the library table.
     fn delete_replay(&mut self, game_id: i32) {
-        // Pull the content_hash off the row before we delete it, so
-        // we can clean up the matching analysis-cache sidecar after.
-        // Best-effort: a missing hash just means we skip the cache
-        // wipe — the cached entry will get evicted naturally when
-        // the LRU budget needs the space.
-        let content_hash = self.fetch_content_hash(game_id);
-
         self.ensure_db();
         let Some(conn) = self.db_conn.as_mut() else {
             self.last_delete_summary = Some(Err(self
@@ -497,15 +426,8 @@ impl StatsMeleeApp {
                 self.summary_for = None;
                 self.summary_rx = None;
                 self.summary_loading = false;
-                // Best-effort: drop the analysis sidecar for this
-                // replay's content hash. Failure is logged but not
-                // surfaced.
-                if let Some(hash) = content_hash {
-                    // AnalysisCache doesn't expose per-key delete
-                    // yet — orphaned entries fall out via LRU
-                    // eviction when the budget rolls over.
-                    let _ = hash;
-                }
+                // The replay's analysis-cache sidecar is now orphaned;
+                // it falls out via LRU eviction when the budget rolls over.
             }
             Err(e) => {
                 self.last_delete_summary = Some(Err(format!("Delete failed: {e}")));
@@ -933,18 +855,14 @@ impl StatsMeleeApp {
 
     /// Navigate to the replay viewer for `game_id`, loading (or re-
     /// loading) its `ViewerState` from the DB + replay file. The load
-    /// is synchronous — a `.slp` parse is typically sub-second, and
-    /// we'd rather block the click than juggle another worker channel
-    /// for now. If this gets painful for long replays we'll mirror the
-    /// summary-worker pattern.
+    /// is synchronous — a `.slp` parse is typically sub-second, so we
+    /// block the click rather than juggle another worker channel.
     fn open_viewer(&mut self, game_id: i32) {
         self.viewing_game_id = Some(game_id);
         self.viewer_state = None; // invalidate before reload
-        // Stale "launched Slippi" / "rendered video" status from a
-        // previous replay would be confusing next to a freshly-opened
-        // viewer.
+        // A stale "launched Slippi" status from a previous replay would
+        // be confusing next to a freshly-opened viewer.
         self.last_slippi_launch = None;
-        self.last_render_summary = None;
         self.page = Page::ReplayViewer;
         self.reload_viewer();
     }
@@ -1106,8 +1024,7 @@ impl StatsMeleeApp {
 
     /// Drain any pending message from the ingest worker. Called at
     /// the top of every `update()` so the result lands on the frame
-    /// it arrives. Same shape as [`Self::poll_summary_worker`] /
-    /// [`Self::poll_render_worker`].
+    /// it arrives. Same shape as [`Self::poll_summary_worker`].
     fn poll_ingest_worker(&mut self) {
         let Some(rx) = self.ingest_rx.as_ref() else {
             return;
@@ -2231,179 +2148,6 @@ impl StatsMeleeApp {
         self.summary_error = None;
     }
 
-    /// Drain any pending message from the render worker. Mirrors
-    /// [`Self::poll_summary_worker`] — called at the top of every
-    /// `update()` so progress + done messages land on the frame they
-    /// arrive.
-    fn poll_render_worker(&mut self) {
-        if self.render_rx.is_none() {
-            return;
-        }
-        // Drain every available message in one pass — Progress events
-        // pile up faster than 60fps when Dolphin is spamming them.
-        loop {
-            // Re-borrow each iteration so the `Done` branch can take
-            // `&mut self` for the cache finalize call.
-            let msg = match self.render_rx.as_ref().map(|rx| rx.try_recv()) {
-                Some(Ok(m)) => m,
-                Some(Err(mpsc::TryRecvError::Empty)) => break,
-                Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                    self.render_rx = None;
-                    self.render_in_flight_hash = None;
-                    self.render_status = None;
-                    self.last_render_summary = Some(Err(
-                        "render worker exited without producing a video".to_string(),
-                    ));
-                    break;
-                }
-                None => break,
-            };
-            match msg {
-                RenderMsg::Progress(s) => {
-                    self.render_status = Some(s);
-                }
-                RenderMsg::Done(result) => {
-                    let in_flight = self.render_in_flight_hash.take();
-                    self.render_rx = None;
-                    self.render_status = None;
-                    if result.is_ok() {
-                        // Tell the video cache the .mp4 just landed
-                        // so its eviction sweep can run. The hash is
-                        // exactly what we handed the worker at
-                        // start_render time.
-                        if let Some(hash) = in_flight {
-                            if let Err(e) = self.video_cache.finalize(&hash) {
-                                eprintln!("video cache finalize failed: {e}");
-                            }
-                        }
-                    }
-                    self.last_render_summary = Some(result);
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Start a fresh render for the currently-viewed replay. Looks up
-    /// the prerequisites (Melee ISO, Dolphin binary, content hash)
-    /// and surfaces a clear error message via `last_render_summary`
-    /// if anything is missing.
-    fn start_render(&mut self) {
-        // Already in flight — don't double-spawn.
-        if self.render_rx.is_some() {
-            return;
-        }
-        // Need a viewer state with a usable replay path.
-        let state = match self.viewer_state.as_ref() {
-            Some(Ok(s)) => s,
-            _ => {
-                self.last_render_summary =
-                    Some(Err("no replay loaded to render".to_string()));
-                return;
-            }
-        };
-        let Some(replay_path) = state.replay_path.clone() else {
-            self.last_render_summary = Some(Err(
-                "this replay has no path on disk; re-ingest to enable rendering".to_string(),
-            ));
-            return;
-        };
-        let game_id = state.game_id;
-
-        // Pull the .slp's content_hash off the row. Without it the
-        // video cache has no stable key to write under, so we'd have
-        // to render every time — better to surface "re-ingest" early.
-        let content_hash = match self.fetch_content_hash(game_id) {
-            Some(h) => h,
-            None => {
-                self.last_render_summary = Some(Err(
-                    "this replay was ingested before content_hash existed; \
-                     re-ingest to enable rendering"
-                        .to_string(),
-                ));
-                return;
-            }
-        };
-
-        // Resolve the prerequisite binaries / iso path.
-        let Some(iso) = self.config.melee_iso_path.clone() else {
-            self.last_render_summary = Some(Err(
-                "set the Melee ISO path in Settings to enable rendering".to_string(),
-            ));
-            return;
-        };
-        if !iso.is_file() {
-            self.last_render_summary = Some(Err(format!(
-                "Melee ISO not found at {}",
-                iso.display()
-            )));
-            return;
-        }
-        let Some(dolphin_binary) = resolve_vanilla_dolphin_binary(&self.config) else {
-            self.last_render_summary = Some(Err(
-                "couldn't find vanilla Dolphin — set the Dolphin binary path in Settings"
-                    .to_string(),
-            ));
-            return;
-        };
-
-        let req = RenderRequest {
-            slp_path: PathBuf::from(replay_path),
-            slp_hash: content_hash.clone(),
-            melee_iso: iso,
-            dolphin_binary,
-            ffmpeg_binary: self.config.effective_ffmpeg_command(),
-            mp4_out: self.video_cache.path_for_write(&content_hash),
-        };
-
-        self.render_in_flight_hash = Some(content_hash);
-        self.render_rx = Some(render_worker::spawn_render(req, self.egui_ctx.clone()));
-        self.render_status = Some("Starting render".to_string());
-        self.last_render_summary = None;
-    }
-
-    /// Path to the cached MP4 for the currently-viewed replay, if
-    /// the video cache has it. Looks up by content_hash off the
-    /// current viewer state's game id. Returns `None` when:
-    /// - no replay is being viewed,
-    /// - the row has no content_hash (legacy, pre-Track-11d), or
-    /// - the cache doesn't have a matching `.mp4` on disk.
-    fn cached_video_path(&mut self) -> Option<PathBuf> {
-        let game_id = match self.viewer_state.as_ref() {
-            Some(Ok(s)) => s.game_id,
-            _ => return None,
-        };
-        let hash = self.fetch_content_hash(game_id)?;
-        self.video_cache.lookup(&hash)
-    }
-
-    /// Pull the .slp content_hash for a game id off the DB. Helper
-    /// for [`Self::start_render`] — separated so the borrow checker
-    /// is happy about us holding `self.db_conn` mutably here while the
-    /// rest of `start_render` is reading other fields.
-    fn fetch_content_hash(&mut self, game_id: i32) -> Option<String> {
-        use diesel::prelude::*;
-        use stats_melee::schema::game::dsl as g;
-
-        self.ensure_db();
-        let conn = self.db_conn.as_mut()?;
-        g::game
-            .filter(g::id.eq(game_id))
-            .select(g::content_hash)
-            .first::<Option<String>>(conn)
-            .ok()
-            .flatten()
-    }
-
-    /// Open the cached MP4 for the currently-viewed replay in the OS
-    /// default video player. Caller is responsible for having
-    /// confirmed cache.lookup() returned `Some` first.
-    fn open_video(&mut self, video_path: &Path) {
-        if let Err(e) = open_in_os_player(video_path) {
-            self.last_render_summary = Some(Err(e.to_string()));
-        }
-    }
-
     /// Drain any pending message from the summary worker. Called at the
     /// top of every `update()` so results show up the frame they arrive.
     fn poll_summary_worker(&mut self) {
@@ -2564,8 +2308,6 @@ impl StatsMeleeApp {
         let mut back_clicked = false;
         let mut reload_clicked = false;
         let mut launch_clicked = false;
-        let mut render_clicked = false;
-        let mut open_video_clicked: Option<PathBuf> = None;
 
         // Whether the currently-loaded viewer has a usable replay_path —
         // used to enable/disable the "Open in Slippi" button below.
@@ -2573,21 +2315,6 @@ impl StatsMeleeApp {
             &self.viewer_state,
             Some(Ok(s)) if s.replay_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false)
         );
-
-        // Render-button gating: we need a viewer state, an ISO path,
-        // and a non-empty content_hash on the current viewer's
-        // game row. The hash check is what the actual `start_render`
-        // path enforces — pre-checking here so the button is greyed
-        // out instead of silently failing on click.
-        let render_in_flight = self.render_rx.is_some();
-        let iso_set = self.config.melee_iso_path.is_some();
-        let cached_video = self.cached_video_path();
-        let can_render = !render_in_flight
-            && iso_set
-            && matches!(
-                &self.viewer_state,
-                Some(Ok(s)) if s.replay_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false)
-            );
 
         // Nav bar.
         ui.horizontal(|ui| {
@@ -2616,60 +2343,6 @@ impl StatsMeleeApp {
                 launch_clicked = true;
             }
 
-            // "Render video" + "Open video" — gated behind the
-            // `RENDER_VIDEO_FEATURE_ENABLED` flag while Track 10 is
-            // parked (see the const's docstring + TODO.txt). When
-            // off, none of these branches render anything and the
-            // worker-state fields just sit idle on `self`.
-            if RENDER_VIDEO_FEATURE_ENABLED {
-                if let Some(path) = cached_video.clone() {
-                    let open_btn = egui::Button::new("🎞 Open video");
-                    if ui
-                        .add(open_btn)
-                        .on_hover_text("Opens the cached MP4 in your default video player")
-                        .clicked()
-                    {
-                        open_video_clicked = Some(path);
-                    }
-                    let rerender_btn = egui::Button::new("↻ Re-render");
-                    let resp = ui.add_enabled(can_render, rerender_btn);
-                    let resp = if !iso_set {
-                        resp.on_disabled_hover_text(
-                            "Set the Melee ISO path in Settings to enable rendering",
-                        )
-                    } else if render_in_flight {
-                        resp.on_disabled_hover_text("Render already in progress")
-                    } else {
-                        resp.on_hover_text("Re-render this replay (replaces the cached MP4)")
-                    };
-                    if resp.clicked() {
-                        render_clicked = true;
-                    }
-                } else {
-                    let render_btn = egui::Button::new("🎞 Render video");
-                    let resp = ui.add_enabled(can_render, render_btn);
-                    let resp = if !iso_set {
-                        resp.on_disabled_hover_text(
-                            "Set the Melee ISO path in Settings to enable rendering",
-                        )
-                    } else if render_in_flight {
-                        resp.on_disabled_hover_text("Render already in progress")
-                    } else if !can_launch {
-                        resp.on_disabled_hover_text(
-                            "No replay file path on this game row — re-ingest to enable",
-                        )
-                    } else {
-                        resp.on_hover_text(
-                            "Renders this replay headlessly via Slippi Dolphin + ffmpeg \
-                             (a few seconds for a 5-minute replay)",
-                        )
-                    };
-                    if resp.clicked() {
-                        render_clicked = true;
-                    }
-                }
-            }
-
             if let Some(gid) = self.viewing_game_id {
                 ui.add_space(12.0);
                 ui.label(
@@ -2693,42 +2366,6 @@ impl StatsMeleeApp {
                 }
                 Err(e) => {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("⚠ {e}"));
-                }
-            }
-        }
-
-        // Render progress / completion status — gated alongside the
-        // render buttons. `render_status` and `last_render_summary`
-        // can only ever be `Some` when the feature is enabled (the
-        // worker is the only thing that sets them), but we still
-        // gate the UI so a stale `Some` from a previous build doesn't
-        // surface unexpectedly.
-        if RENDER_VIDEO_FEATURE_ENABLED {
-            if let Some(status) = &self.render_status {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        egui::RichText::new(status.as_str())
-                            .italics()
-                            .color(egui::Color32::GRAY),
-                    );
-                });
-            } else if let Some(result) = &self.last_render_summary {
-                ui.add_space(4.0);
-                match result {
-                    Ok(path) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(90, 180, 100),
-                            format!("✓ Rendered: {}", path.display()),
-                        );
-                    }
-                    Err(e) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 80, 80),
-                            format!("⚠ {e}"),
-                        );
-                    }
                 }
             }
         }
@@ -2770,13 +2407,6 @@ impl StatsMeleeApp {
             self.viewing_game_id = None;
             self.viewer_state = None;
             self.last_slippi_launch = None;
-            self.last_render_summary = None;
-        }
-        if render_clicked {
-            self.start_render();
-        }
-        if let Some(p) = open_video_clicked {
-            self.open_video(&p);
         }
         if reload_clicked {
             self.reload_viewer();
@@ -2794,7 +2424,6 @@ impl StatsMeleeApp {
         let mut slippi_binary_pick_clicked = false;
         let mut melee_iso_save_pending = false;
         let mut melee_iso_pick_clicked = false;
-        let mut ffmpeg_save_pending = false;
         let mut icon_extract_clicked = false;
 
         egui::Grid::new("settings_grid")
@@ -2902,71 +2531,28 @@ impl StatsMeleeApp {
                 });
                 ui.end_row();
 
-                // Melee ISO + ffmpeg rows — only relevant for the
-                // in-house render-video pipeline, which is parked
-                // (RENDER_VIDEO_FEATURE_ENABLED = false) while we ship
-                // the Slippi-launcher production build. The config
-                // fields stay so a user who already set them keeps
-                // their values for when the feature comes back.
-                if RENDER_VIDEO_FEATURE_ENABLED {
-                    ui.label("Melee ISO").on_hover_text(
-                        "Path to your Super Smash Bros. Melee 1.02 NTSC ISO. \
-                         Required for the headless render pipeline (the \
-                         'Render video' button on the viewer page). If you \
-                         don't render videos, this can stay unset.",
-                    );
-                    ui.horizontal(|ui| {
-                        let display = match &self.config.melee_iso_path {
-                            Some(p) => p.display().to_string(),
-                            None => "(not set)".to_string(),
-                        };
-                        ui.label(display);
-                        if ui.button("Browse…").clicked() {
-                            melee_iso_pick_clicked = true;
-                        }
-                        if self.config.melee_iso_path.is_some()
-                            && ui.button("Clear").clicked()
-                        {
-                            self.config.melee_iso_path = None;
-                            melee_iso_save_pending = true;
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.label("ffmpeg binary").on_hover_text(
-                        "Override path to ffmpeg. Leave empty to use \
-                         whatever's on PATH (the default `brew install \
-                         ffmpeg` setup works without an override).",
-                    );
-                    ui.horizontal(|ui| {
-                        let mut buf = self
-                            .config
-                            .ffmpeg_command
-                            .clone()
-                            .unwrap_or_default();
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut buf)
-                                .hint_text("(use PATH)")
-                                .desired_width(320.0),
-                        );
-                        if resp.changed() {
-                            let trimmed = buf.trim();
-                            self.config.ffmpeg_command = if trimmed.is_empty() {
-                                None
-                            } else {
-                                Some(buf.clone())
-                            };
-                        }
-                        if resp.lost_focus() {
-                            ffmpeg_save_pending = true;
-                        }
-                        if !buf.is_empty() && ui.button("Clear").clicked() {
-                            self.config.ffmpeg_command = None;
-                            ffmpeg_save_pending = true;
-                        }
-                    });
-                    ui.end_row();
-                }
+                // Melee ISO — Slippi Dolphin needs the game disc image to
+                // boot a replay, so "Open in Slippi" passes this to Dolphin.
+                ui.label("Melee ISO").on_hover_text(
+                    "Path to your Super Smash Bros. Melee 1.02 NTSC ISO. \
+                     Needed to play replays in Slippi ('Open in Slippi' on \
+                     the viewer page); browsing and stats work without it.",
+                );
+                ui.horizontal(|ui| {
+                    let display = match &self.config.melee_iso_path {
+                        Some(p) => p.display().to_string(),
+                        None => "(not set)".to_string(),
+                    };
+                    ui.label(display);
+                    if ui.button("Browse…").clicked() {
+                        melee_iso_pick_clicked = true;
+                    }
+                    if self.config.melee_iso_path.is_some() && ui.button("Clear").clicked() {
+                        self.config.melee_iso_path = None;
+                        melee_iso_save_pending = true;
+                    }
+                });
+                ui.end_row();
             });
 
         if slippi_binary_pick_clicked {
@@ -2978,7 +2564,7 @@ impl StatsMeleeApp {
         if melee_iso_pick_clicked {
             self.pick_melee_iso();
         }
-        if melee_iso_save_pending || ffmpeg_save_pending {
+        if melee_iso_save_pending {
             self.save_config();
         }
         if icon_extract_clicked {
@@ -3068,9 +2654,6 @@ impl eframe::App for StatsMeleeApp {
 
         // Drain any pending summary-worker result before we repaint.
         self.poll_summary_worker();
-        // Same for the render worker — both background threads' state
-        // gets reflected on this frame.
-        self.poll_render_worker();
         // Same for the ingestion worker — drain a Done message so
         // the rows + status flip on the same frame the scan finishes.
         self.poll_ingest_worker();
@@ -3208,57 +2791,6 @@ fn open_analysis_cache() -> anyhow::Result<AnalysisCache> {
     )
 }
 
-/// Open the production video cache, sibling of the analysis cache
-/// under `<ProjectDirs::cache_dir>/video/`. Same fallback contract as
-/// [`open_analysis_cache`] — production callers wrap this in an
-/// `unwrap_or_else` that points at a tempdir.
-fn open_video_cache() -> anyhow::Result<VideoCache> {
-    let dirs = directories::ProjectDirs::from("", "", "stats-melee")
-        .ok_or_else(|| anyhow::anyhow!("could not resolve a platform cache directory"))?;
-    let root = dirs.cache_dir().join("video");
-    VideoCache::open(root, VideoCacheConfig::default())
-}
-
-/// Resolve the actual user dir Slippi's playback Dolphin reads on
-/// startup. The render worker writes its dump config into this dir
-/// (with backup/restore around the render). See [`render_worker`]'s
-/// module docs for the empirical history of why we don't try to
-/// override this via `-u <our-dir>`.
-///
-/// **Path subtlety:** Dolphin reads from `Application Support/<bundle-
-/// identifier>/playback/User/`, where the bundle identifier is
-/// `com.project-slippi.dolphin`. NOT `Slippi Launcher/playback/User/`
-/// — the "Slippi Launcher" subdir holds the *Launcher app*'s config
-/// (and a copy of the Dolphin .app bundle), not Dolphin's runtime
-/// state. Confirmed empirically against a Slippi Launcher 2.x
-/// install on macOS 14+: the populated GFX.ini lives at
-/// `com.project-slippi.dolphin/playback/User/Config/GFX.ini`.
-///
-/// Currently macOS-only — Linux / Windows Slippi installs would have
-/// their own equivalent paths and would surface here, but we don't
-/// have user reports yet. Returns `Err` on unsupported platforms or
-/// when `HOME` isn't set.
-/// Resolve the vanilla Dolphin binary path for the render worker.
-///
-/// The render pipeline requires a patched vanilla Dolphin master build
-/// (interpreter mode, --user isolation), NOT Slippi Playback Dolphin. It's
-/// resolved solely from the `slippi_playback_command` config override — the
-/// render feature is parked ([`RENDER_VIDEO_FEATURE_ENABLED`]), so there's no
-/// platform auto-discovery here. `None` when no override is set.
-fn resolve_vanilla_dolphin_binary(config: &AppConfig) -> Option<PathBuf> {
-    use crate::slippi::predict_app_inner_binary;
-
-    config
-        .slippi_playback_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let raw = PathBuf::from(s);
-            predict_app_inner_binary(&raw).unwrap_or(raw)
-        })
-}
-
 /// First-launch icon population: if the writable assets dir has no character
 /// art yet, rip it from a local Slippi Launcher install. Best-effort and
 /// one-shot — no Slippi, no write permission, or a bundle-layout change all
@@ -3283,49 +2815,6 @@ fn ensure_slippi_icons() {
         ),
         Err(e) => eprintln!("stats-melee: Slippi icon extraction skipped ({e})"),
     }
-}
-
-/// Cross-platform "open this file in the OS default handler". Shells
-/// out so we don't pull in another GUI dep just for this one button.
-///
-/// Each platform gets a separate cfg-gated implementation to keep the
-/// argv list local to its branch — Windows in particular needs the
-/// `cmd /C start "" <path>` dance because `start` is a cmd builtin
-/// rather than a real binary.
-#[cfg(target_os = "macos")]
-fn open_in_os_player(path: &Path) -> anyhow::Result<()> {
-    std::process::Command::new("open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))
-}
-
-#[cfg(target_os = "linux")]
-fn open_in_os_player(path: &Path) -> anyhow::Result<()> {
-    std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))
-}
-
-#[cfg(target_os = "windows")]
-fn open_in_os_player(path: &Path) -> anyhow::Result<()> {
-    // The empty `""` after `start` is the window-title arg — without
-    // it, `start` interprets a quoted path as the title.
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", path.to_string_lossy().as_ref()])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn open_in_os_player(_path: &Path) -> anyhow::Result<()> {
-    Err(anyhow::anyhow!(
-        "open-in-default-player is not implemented on this platform"
-    ))
 }
 
 /// Display label for the Analytics character selector. `None` → "Any";

@@ -7,12 +7,12 @@
 //!
 //! ## v1 vs v2
 //!
-//! The original classifier (Track 2j) was hitstun-only — `AdvP1` meant
-//! literally "P2 is in a damage action state right now". That captured "true
-//! combo in progress" perfectly but missed everything else competitive Melee
-//! commentators call "advantage": the hitstun tail that follows a knockdown,
-//! the off-stage edgeguard, the ledge-trap. Track 9 layers those signals on
-//! top of the v1 hitstun classifier:
+//! The v1 classifier is hitstun-only — `AdvP1` means literally "P2 is in a
+//! damage action state right now". That captures "true combo in progress"
+//! perfectly but misses everything else competitive Melee commentators call
+//! "advantage": the hitstun tail that follows a knockdown, the off-stage
+//! edgeguard, the ledge-trap. v2 layers those signals on top of the v1
+//! hitstun classifier:
 //!
 //! 1. **Hitstun (v1)** — direct, highest priority. Someone is being hit
 //!    *right now*; no other layer overrides this.
@@ -352,9 +352,8 @@ pub struct ReplayAnalysis {
 pub const CACHED_ANALYSIS_VERSION: u32 = 1;
 
 /// On-disk wrapper for a cached [`ReplayAnalysis`]. Stored bincode-
-/// serialized in the analysis sidecar cache (Track 11), keyed on the
-/// .slp content hash. The viewer's load path consults this *before*
-/// re-parsing peppi.
+/// serialized in the analysis sidecar cache, keyed on the .slp content
+/// hash. The viewer's load path consults this *before* re-parsing peppi.
 ///
 /// Cache invalidation is two-pronged:
 ///

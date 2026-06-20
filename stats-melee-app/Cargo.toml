@@ -22,8 +22,7 @@ stats-melee = { path = "../stats-melee" }
 # winit/objc2 past the bug.
 eframe = "0.29"
 egui = "0.29"
-# `datepicker` will be pulled in later when the replay-library date filter
-# lands; for the skeleton we only need the core extras (TableBuilder etc).
+# Table layout (TableBuilder) and the date picker for the library filters.
 egui_extras = "0.29"
 
 # Native platform goodies.
@@ -35,7 +34,7 @@ directories = "5"     # OS-appropriate config + data dirs (ProjectDirs)
 
 # Decoding character/stage icon PNGs for the replay library + viewer.
 # Default features pull in every codec; we only ship PNG icons, so trim
-# to just that. Already in the lockfile transitively via egui_extras.
+# to just that.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Settings persistence.
@@ -51,8 +50,3 @@ anyhow = "1"
 # Version + features kept in sync with stats-melee so Cargo unifies to a
 # single instance.
 diesel = { version = "2.2.0", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
-
-[dev-dependencies]
-# Used by render_worker.rs tests for the tempdir-based fixture; the
-# library crate already pulls this in for its own tests.
-tempfile = "3"

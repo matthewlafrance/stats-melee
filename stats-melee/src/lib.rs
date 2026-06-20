@@ -1,7 +1,4 @@
-pub mod dtm;
 pub mod gamedata;
-pub mod melee_boot_nav;
-pub mod slp_to_dtm;
 pub mod advanced;
 pub mod analytics;
 pub mod analysis_cache;
@@ -12,7 +9,6 @@ pub mod punish;
 pub mod schema;
 pub mod stage_bounds;
 pub mod testing;
-pub mod video_cache;
 
 // Re-export the embedded migrations bundle so callers outside of test code
 // (e.g. the GUI app) can open a fresh DB at an arbitrary path and run all
@@ -53,7 +49,7 @@ pub fn parse_single_replay<P: AsRef<Path>>(path: P) -> Result<GameData> {
 
 /// Compute the hex-encoded SHA-256 of the .slp file's bytes. Used at
 /// ingestion time to populate `game.content_hash`, which the analysis
-/// sidecar cache (Track 11) keys on.
+/// sidecar cache keys on.
 ///
 /// Streams the file through the hasher in 64 KiB chunks rather than
 /// reading into memory first — replays are typically a few MB but
@@ -1229,10 +1225,8 @@ pub fn most_common_kill_moves_by_code(
 
 /// Filterable variant of [`most_common_kill_moves_by_code`].
 ///
-/// Track 8d will gate the kill-move table on a non-`None` `character_id`
-/// (so attack ids can be resolved through a character-specific name table)
-/// — this helper accepts the unfiltered case anyway so callers that want
-/// the raw cross-character distribution can still get it.
+/// Accepts the unfiltered case as well, so callers that want the raw
+/// cross-character distribution can still get it.
 pub fn most_common_kill_moves_filtered(
     conn: &mut SqliteConnection,
     player_code: &str,

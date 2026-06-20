@@ -4,7 +4,7 @@ use peppi::io::slippi;
 use std::{fs, io};
 
 use stats_melee::combat::{compute_combat_states_1v1, CombatState, CombatSummary};
-use stats_melee::testing::fixture_slps;
+use stats_melee::testing::fixture_slps_or_skip;
 
 /// Re-parse the .slp as a peppi Game (rather than going through GameData) so
 /// the combat detector can see raw frame data.
@@ -15,7 +15,10 @@ fn parse_peppi(path: &std::path::Path) -> peppi::game::immutable::Game {
 
 #[test]
 fn combat_states_cover_every_frame() {
-    let slps = fixture_slps().expect("fixtures");
+    // The fixture corpus is local-only (gitignored); skip when it's absent.
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
     assert!(slps.len() >= 5, "need >=5 fixtures");
 
     let mut checked = 0;
@@ -52,7 +55,9 @@ fn combat_summary_proportions_are_reasonable() {
     // fraction should be below 99%. If the classifier silently returned
     // Neutral for every frame (e.g. due to a peppi API mismatch), this would
     // pin it at 1.0 and we'd catch it here.
-    let slps = fixture_slps().expect("fixtures");
+    let Some(slps) = fixture_slps_or_skip() else {
+        return;
+    };
 
     let mut all_states: Vec<CombatState> = Vec::new();
     for slp in slps.iter().take(10) {

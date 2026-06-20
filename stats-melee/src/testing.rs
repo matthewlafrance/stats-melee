@@ -73,6 +73,16 @@ pub fn fixture_slps() -> Result<Vec<PathBuf>> {
     slps_in(&dir)
 }
 
+/// Like [`fixture_slps`], but returns `None` when the fixture corpus is
+/// absent or empty. The corpus is local-only (gitignored), so integration
+/// tests use this to skip rather than fail on a clean checkout / CI.
+pub fn fixture_slps_or_skip() -> Option<Vec<PathBuf>> {
+    match fixture_slps() {
+        Ok(slps) if !slps.is_empty() => Some(slps),
+        _ => None,
+    }
+}
+
 /// List `.slp` files directly under `root`, sorted by filename.
 pub fn slps_in(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();

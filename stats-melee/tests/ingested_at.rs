@@ -18,16 +18,18 @@ use std::io;
 use peppi::io::slippi;
 use stats_melee::gamedata::GameData;
 use stats_melee::post_game;
-use stats_melee::testing::{fixture_slps, TestDb};
+use stats_melee::testing::{fixture_slps_or_skip, TestDb};
 
 use diesel::prelude::*;
 
-fn parse_one() -> GameData {
-    let slps = fixture_slps().expect("fixture listing");
-    let first = slps.first().expect("at least one fixture");
+/// Parse the first fixture into a `GameData`, or `None` when the local-only
+/// fixture corpus is absent so callers can skip on a clean checkout / CI.
+fn parse_one() -> Option<GameData> {
+    let slps = fixture_slps_or_skip()?;
+    let first = slps.first()?;
     let mut r = io::BufReader::new(fs::File::open(first).expect("open fixture"));
     let raw = slippi::read(&mut r, None).expect("peppi parse");
-    GameData::new_gamedata(&raw).expect("GameData")
+    Some(GameData::new_gamedata(&raw).expect("GameData"))
 }
 
 #[test]
@@ -35,7 +37,9 @@ fn ingested_at_is_populated_on_insert() {
     use stats_melee::schema::game::dsl as g;
 
     let mut db = TestDb::new().expect("tempdir db");
-    let gd = parse_one();
+    let Some(gd) = parse_one() else {
+        return;
+    };
     let inserted = post_game(&mut db.conn, &gd).expect("post_game");
 
     // Re-query — `post_game` returns the row via RETURNING, so the
@@ -60,7 +64,9 @@ fn ingested_at_is_populated_on_insert() {
 #[test]
 fn ingested_at_has_iso8601_shape() {
     let mut db = TestDb::new().expect("tempdir db");
-    let gd = parse_one();
+    let Some(gd) = parse_one() else {
+        return;
+    };
     let inserted = post_game(&mut db.conn, &gd).expect("post_game");
 
     // Shape: "YYYY-MM-DD HH:MM:SS" — 19 chars, specific delimiter layout.
@@ -91,7 +97,9 @@ fn ingested_at_lex_order_matches_insertion_order() {
     // sorts >= the first when compared lexicographically. This is the
     // invariant the Replay Library's sort-by-date relies on.
     let mut db = TestDb::new().expect("tempdir db");
-    let gd = parse_one();
+    let Some(gd) = parse_one() else {
+        return;
+    };
 
     let a = post_game(&mut db.conn, &gd).expect("post first");
     // Sleep a second so the TIMESTAMP column (second-resolution) can tick.

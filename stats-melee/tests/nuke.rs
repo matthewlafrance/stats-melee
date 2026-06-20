@@ -11,28 +11,33 @@
 use std::fs;
 
 use stats_melee::{is_games_empty, nuke_replay, nuke_replays, parse_new_replays};
-use stats_melee::testing::{fixture_slps, TestDb};
+use stats_melee::testing::{fixture_slps_or_skip, TestDb};
 
 /// Copy a handful of fixtures into a tempdir arranged the way
 /// `parse_new_replays` expects (root → session subdir → .slp files).
-fn stage_fixtures(session_name: &str) -> (tempfile::TempDir, usize) {
+///
+/// Returns `None` when the local-only fixture corpus is absent so the
+/// calling test can skip on a clean checkout / CI.
+fn stage_fixtures(session_name: &str) -> Option<(tempfile::TempDir, usize)> {
+    let fixtures = fixture_slps_or_skip()?;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = root.path().join(session_name);
     fs::create_dir_all(&session_dir).unwrap();
 
-    let fixtures = fixture_slps().expect("fixture listing");
     let sample: Vec<_> = fixtures.iter().take(5).collect();
     for slp in &sample {
         let dest = session_dir.join(slp.file_name().unwrap());
         fs::copy(slp, &dest).expect("copy fixture");
     }
-    (root, sample.len())
+    Some((root, sample.len()))
 }
 
 #[test]
 fn rescanning_same_folder_is_idempotent() {
     let mut db = TestDb::new().expect("tempdir db");
-    let (root, expected) = stage_fixtures("session-001");
+    let Some((root, expected)) = stage_fixtures("session-001") else {
+        return;
+    };
     let db_path = db.path.clone();
 
     let first = parse_new_replays(&mut db.conn, root.path(), &db_path)
@@ -53,7 +58,9 @@ fn rescanning_same_folder_is_idempotent() {
 #[test]
 fn nuke_clears_replays_and_permits_reingest() {
     let mut db = TestDb::new().expect("tempdir db");
-    let (root, expected) = stage_fixtures("session-001");
+    let Some((root, expected)) = stage_fixtures("session-001") else {
+        return;
+    };
     let db_path = db.path.clone();
 
     let ingested = parse_new_replays(&mut db.conn, root.path(), &db_path)
@@ -90,7 +97,9 @@ fn switching_folders_ingests_older_replays() {
     let mut db = TestDb::new().expect("tempdir db");
 
     // Folder A — ingest first, bumping the db file's mtime.
-    let (root_a, a_count) = stage_fixtures("session-a");
+    let Some((root_a, a_count)) = stage_fixtures("session-a") else {
+        return;
+    };
     let db_path = db.path.clone();
     let a_ingested = parse_new_replays(&mut db.conn, root_a.path(), &db_path)
         .expect("scan a");
@@ -100,7 +109,9 @@ fn switching_folders_ingests_older_replays() {
     // these files' mtimes will land after the DB was last touched, but
     // that's fine: the guarantee we care about is that switching folders
     // works independently of mtimes.
-    let (root_b, b_count) = stage_fixtures("session-b");
+    let Some((root_b, b_count)) = stage_fixtures("session-b") else {
+        return;
+    };
     let b_ingested = parse_new_replays(&mut db.conn, root_b.path(), &db_path)
         .expect("scan b");
     assert_eq!(
@@ -120,7 +131,9 @@ fn per_row_delete_removes_one_game_and_leaves_others() {
     use stats_melee::schema::game::dsl as g;
 
     let mut db = TestDb::new().expect("tempdir db");
-    let (root, expected) = stage_fixtures("session-001");
+    let Some((root, expected)) = stage_fixtures("session-001") else {
+        return;
+    };
     let db_path = db.path.clone();
 
     let ingested = parse_new_replays(&mut db.conn, root.path(), &db_path)

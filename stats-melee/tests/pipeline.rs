@@ -7,7 +7,7 @@ use stats_melee::{
     get_stats_for_game, parse_new_replays, parse_single_replay, player_summary,
     player_summary_filtered, post_game, PlayerSummary, PlayerSummaryFilter,
 };
-use stats_melee::testing::{fixture_slps, TestDb};
+use stats_melee::testing::{fixture_slps_or_skip, TestDb};
 
 /// Copy a handful of fixture replays into a tempdir arranged the way
 /// `parse_new_replays` expects (root → session subdir → .slp files), then run
@@ -15,7 +15,9 @@ use stats_melee::testing::{fixture_slps, TestDb};
 #[test]
 fn parse_new_replays_ingests_fixtures() {
     let mut db = TestDb::new().expect("tempdir db");
-    let fixtures = fixture_slps().expect("fixture listing");
+    let Some(fixtures) = fixture_slps_or_skip() else {
+        return;
+    };
     assert!(fixtures.len() >= 5, "need at least 5 fixtures");
 
     let root = tempfile::tempdir().expect("tempdir");
@@ -41,9 +43,9 @@ fn parse_new_replays_ingests_fixtures() {
         "expected to ingest every copied fixture"
     );
 
-    // Every ingested row should carry a content_hash — Track 11d's
-    // contract is that production ingestion always populates the
-    // sidecar-cache key. Hex-SHA256 is exactly 64 lowercase hex chars.
+    // Every ingested row should carry a content_hash — production
+    // ingestion always populates the sidecar-cache key. Hex-SHA256 is
+    // exactly 64 lowercase hex chars.
     use diesel::prelude::*;
     use stats_melee::schema::game::dsl as game_dsl;
     let hashes: Vec<Option<String>> = game_dsl::game
@@ -69,7 +71,9 @@ fn parse_new_replays_ingests_fixtures() {
 #[test]
 fn analytics_roundtrip_on_fixtures() {
     let mut db = TestDb::new().expect("tempdir db");
-    let fixtures = fixture_slps().expect("fixture listing");
+    let Some(fixtures) = fixture_slps_or_skip() else {
+        return;
+    };
 
     // Pull in up to 20 fixtures so the resulting analytics have something to
     // aggregate over but tests stay fast.
@@ -130,7 +134,7 @@ fn analytics_roundtrip_on_fixtures() {
         games.len()
     );
 
-    // --- game_player_stat assertions (Track 2) ---
+    // --- game_player_stat assertions ---
 
     // Every ingested game should have at least one stat row, and every stat
     // row should have a sane placement + stocks value.
@@ -278,7 +282,9 @@ fn player_summary_filtered_narrows_by_character_and_stage() {
     use stats_melee::{get_character, get_game_player_code};
 
     let mut db = TestDb::new().expect("tempdir db");
-    let fixtures = fixture_slps().expect("fixture listing");
+    let Some(fixtures) = fixture_slps_or_skip() else {
+        return;
+    };
     let sample: Vec<_> = fixtures.iter().take(20).collect();
 
     let mut codes_seen: Vec<String> = Vec::new();
