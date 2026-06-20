@@ -632,9 +632,11 @@ mod tests {
             Platform::MacOs,
         )
         .expect("should succeed");
+        // Compare as paths (component-wise) so the host separator doesn't
+        // matter — the resolver joins with `\` on Windows.
         assert_eq!(
-            plan.program,
-            "/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin"
+            PathBuf::from(&plan.program),
+            PathBuf::from("/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin")
         );
     }
 
