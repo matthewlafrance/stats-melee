@@ -25,15 +25,16 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
-use stats_melee::gamedata::{CHARACTERS, STAGES};
+use stats_melee::gamedata::{CHARACTERS, INTERNAL_TO_EXTERNAL_CHARACTER, STAGES};
 
 /// Internal character id (our [`CHARACTERS`] order) → external id (the folder
 /// names inside Slippi's stock-icon `require.context`). Covers the 27 playable
 /// slots; ids past this (Master Hand, etc.) have no stock icon.
-const INT_TO_EXT: [u32; 27] = [
-    8, 2, 0, 1, 4, 5, 6, 19, 11, 12, 14, 14, 13, 16, 17, 15, 10, 7, 9, 18, 21, 22, 20, 24, 3, 25,
-    23,
-];
+///
+/// Taken from the library rather than restated here: it needs the same
+/// mapping to read characters out of the Game Start block, and a second copy
+/// that drifted would silently label every icon with the wrong fighter.
+const INT_TO_EXT: [u8; 27] = INTERNAL_TO_EXTERNAL_CHARACTER;
 
 /// Minimal read-only reader for Electron's `asar` archive format.
 struct Asar {

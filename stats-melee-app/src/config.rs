@@ -4,7 +4,7 @@
 //! `directories` crate's `ProjectDirs`):
 //!
 //! - Linux:   `$XDG_CONFIG_HOME/stats-melee/config.toml`
-//!            (falls back to `$HOME/.config/stats-melee/config.toml`)
+//!   (falls back to `$HOME/.config/stats-melee/config.toml`)
 //! - macOS:   `$HOME/Library/Application Support/dev.slippi.stats-melee/config.toml`
 //! - Windows: `%APPDATA%\slippi\stats-melee\config\config.toml`
 //!
@@ -97,8 +97,7 @@ impl AppConfig {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow!("mkdir {}: {e}", parent.display()))?;
         }
-        let raw = toml::to_string_pretty(self)
-            .map_err(|e| anyhow!("serialize config: {e}"))?;
+        let raw = self.to_toml_string()?;
         std::fs::write(&path, raw)
             .map_err(|e| anyhow!("writing {}: {e}", path.display()))
     }
@@ -149,7 +148,7 @@ impl AppConfig {
     pub fn needs_onboarding(&self) -> bool {
         self.replay_dir
             .as_deref()
-            .map_or(true, |p| p.as_os_str().is_empty())
+            .is_none_or(|p| p.as_os_str().is_empty())
     }
 }
 

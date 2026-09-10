@@ -5,7 +5,8 @@ use serde_json::{map, value};
 use soccer::{Display, Into, TryFrom};
 use std::string;
 
-use crate::advanced::{compute_advanced_stats_1v1, AdvancedStats};
+use crate::advanced::{compute_advanced_stats_1v1_with, AdvancedStats};
+use crate::combat::compute_analysis_1v1;
 use crate::punish::{extract_punishes_1v1, RawPunish};
 
 pub static STAGES: [&str; 33] = [
@@ -196,11 +197,64 @@ pub static CHARACTERS: [&str; 33] = [
     "Sandbag",
 ];
 
+/// Internal character id (this crate's [`CHARACTERS`] order) → the *external*
+/// id, which is what the Game Start block stores and what Slippi's own asset
+/// folders are named after.
+///
+/// Melee carries two character id spaces and they disagree almost everywhere:
+/// internal 0 is Mario while external 0 is Captain Falcon. Replay *metadata*
+/// keys its `characters` map by internal id, but the Game Start block reports
+/// external — so any code reading characters out of Game Start has to convert
+/// or it will silently label every replay with the wrong fighter.
+///
+/// Covers the 27 playable slots; ids past this (Master Hand, Giga Bowser,
+/// Sandbag) never appear as a player's character.
+pub const INTERNAL_TO_EXTERNAL_CHARACTER: [u8; 27] = [
+    8, 2, 0, 1, 4, 5, 6, 19, 11, 12, 14, 14, 13, 16, 17, 15, 10, 7, 9, 18, 21, 22, 20, 24, 3, 25,
+    23,
+];
+
+/// External character id → internal, the direction needed when reading the
+/// Game Start block.
+///
+/// External 14 (Ice Climbers) maps to internal 10 (Popo) rather than 11
+/// (Nana): Game Start names the *player's* character, and the player controls
+/// Popo. Nana is a follower and never appears here.
+pub fn external_to_internal_character(external: u8) -> Option<i32> {
+    INTERNAL_TO_EXTERNAL_CHARACTER
+        .iter()
+        .position(|&e| e == external)
+        .map(|i| i as i32)
+}
+
+/// Internal character id → external. Inverse of
+/// [`external_to_internal_character`].
+pub fn internal_to_external_character(internal: i32) -> Option<u8> {
+    usize::try_from(internal)
+        .ok()
+        .and_then(|i| INTERNAL_TO_EXTERNAL_CHARACTER.get(i).copied())
+}
+
 #[derive(Debug)]
 pub struct GameData {
-    pub placements: [Option<SlippiPlayer>; 4],
-    /// Stocks remaining at the final recorded frame, indexed by placement slot
-    /// (same ordering as `placements`). `None` if frame data was unavailable.
+    /// Players indexed by **0-based controller port**, not by placement.
+    /// A `None` slot means that port was empty (or its metadata was
+    /// unreadable). Port order is stable across every field below, and
+    /// matches the `port_idx` used by [`crate::punish`] and
+    /// [`crate::advanced`], so all the frame-derived data lines up
+    /// without a translation step.
+    pub players: [Option<SlippiPlayer>; 4],
+    /// `placements[rank]` is the port of the player who finished in
+    /// position `rank` — `placements[0]` is the winner's port. `None`
+    /// means no player took that position.
+    ///
+    /// This is the *only* placement-ordered field; everything else is
+    /// port-ordered. Use [`GameData::player_at_placement`] to go from a
+    /// rank to a player and [`GameData::placement_of_port`] for the
+    /// reverse.
+    pub placements: [Option<usize>; 4],
+    /// Stocks remaining at the final recorded frame, indexed by port.
+    /// `None` if frame data was unavailable.
     pub stocks_remaining: [Option<i32>; 4],
     /// Stocks the player started the game with (4 in most matches, but timed /
     /// handicap matches differ). Read from `game.start.players[port].stocks`.
@@ -219,13 +273,11 @@ pub struct GameData {
     /// Punish events extracted from frame data (see `crate::punish`). Empty
     /// for non-1v1 games (2v2 / FFA aren't supported by the extractor yet)
     /// or when frame data is too sparse to detect any punishes. Keyed by
-    /// peppi `port_idx`, not by placement — the `post_game` layer is
-    /// responsible for translating indices to `gamePlayer.id`s.
+    /// port index, same as `players`.
     pub punishes: Vec<RawPunish>,
-    /// Advanced per-game combat stats keyed by peppi port index (see
+    /// Advanced per-game combat stats keyed by port index (see
     /// `crate::advanced`). `None` for non-1v1 games or when frame data was
-    /// too sparse to analyze. The `post_game` layer maps the port-keyed
-    /// `p1`/`p2` onto each placement's `game_player_stat` row.
+    /// too sparse to analyze.
     pub advanced: Option<AdvancedStats>,
     pub stage: i32,
     pub time: i32,
@@ -235,6 +287,7 @@ pub struct GameData {
     pub started_at: Option<String>,
 }
 
+
 /// Read the final-frame stocks value for `port_idx` (0-based) out of peppi's
 /// columnar frame data. Returns `None` when:
 /// - the port has no frame data (fewer than 4 active ports), or
@@ -243,13 +296,93 @@ pub struct GameData {
 /// `game.frames.ports[i].leader.post.stocks` is an `arrow2::PrimitiveArray<u8>`
 /// containing one value per frame, so we just take the last one.
 fn final_stocks_for_port(game: &Game, port_idx: usize) -> Option<i32> {
-    let port_data = game.frames.ports.get(port_idx)?;
+    let port_data = game.frames.ports.get(frame_slot_for_port(game, port_idx)?)?;
     let stocks = &port_data.leader.post.stocks;
     let n = stocks.len();
     if n == 0 {
         return None;
     }
     Some(stocks.value(n - 1) as i32)
+}
+
+/// Index of `port`'s entry in `game.frames.ports`.
+///
+/// `frames.ports` is dense over the ports that were *occupied*, not indexed
+/// by port number: a game played on ports 1 and 3 has two entries, at slots
+/// 0 and 1.
+///
+/// The two coincide only when players sit on the lowest ports, which Slippi
+/// netplay always does and console setups frequently do not. Indexing that
+/// vector with a port number therefore reads the wrong player's frames — or
+/// no player at all — without erroring. Resolve through `PortData::port`
+/// instead, which is correct either way.
+fn frame_slot_for_port(game: &Game, port_idx: usize) -> Option<usize> {
+    let want = PortIndex::from_index(port_idx)?.to_peppi();
+    game.frames.ports.iter().position(|p| p.port == want)
+}
+
+/// Damage percent at the final recorded frame for one port.
+///
+/// Only used to break stock ties when deriving placements; `None` when the
+/// port has no frame data.
+fn final_percent_for_port(game: &Game, port_idx: usize) -> Option<f32> {
+    let port_data = game.frames.ports.get(frame_slot_for_port(game, port_idx)?)?;
+    let percent = &port_data.leader.post.percent;
+    let n = percent.len();
+    if n == 0 {
+        return None;
+    }
+    Some(percent.value(n - 1))
+}
+
+/// Every port that actually had a player, from the Game Start block.
+///
+/// peppi only lists occupied ports here, so this is the authoritative roster
+/// for replays whose GameEnd block carries no placements.
+fn ports_from_game_start(game: &Game) -> Vec<PortIndex> {
+    game.start
+        .players
+        .iter()
+        .map(|p| PortIndex::from_peppi(p.port))
+        .collect()
+}
+
+/// Reconstruct finishing order from end-of-game frame state, for replays
+/// whose GameEnd block predates placements (Slippi replay spec < 3.13).
+///
+/// Ranking is most-stocks-first, ties broken by lower damage — the same
+/// order Melee itself uses to decide a timeout. Returns `None` when no port
+/// has readable stock data, because the alternative is inventing a winner:
+/// a fabricated `placements[0]` would flow straight into win rates and
+/// head-to-head records as though it were a fact.
+///
+/// This is best-effort even when it succeeds. A game that ended in a quit
+/// (LRAS) is scored on the stocks standing at that moment, which is not
+/// necessarily how a tournament would have recorded it.
+fn derive_placements(game: &Game, ports: &[PortIndex]) -> Option<Vec<PortIndex>> {
+    if !ports
+        .iter()
+        .any(|p| final_stocks_for_port(game, p.as_usize()).is_some())
+    {
+        return None;
+    }
+
+    let mut ranked: Vec<PortIndex> = ports.to_vec();
+    ranked.sort_by(|a, b| {
+        let stocks = |p: &PortIndex| final_stocks_for_port(game, p.as_usize()).unwrap_or(0);
+        let percent = |p: &PortIndex| final_percent_for_port(game, p.as_usize()).unwrap_or(f32::MAX);
+        stocks(b)
+            .cmp(&stocks(a))
+            .then_with(|| {
+                percent(a)
+                    .partial_cmp(&percent(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            // Stable final tiebreak so a genuine tie (equal stocks *and*
+            // equal damage) still produces a deterministic ordering.
+            .then_with(|| a.as_usize().cmp(&b.as_usize()))
+    });
+    Some(ranked)
 }
 
 /// Starting stocks for the given port, from the Game Start event.
@@ -277,7 +410,7 @@ fn starting_stocks_for_port(game: &Game, port: game::Port) -> Option<i32> {
 /// `pre.buttons` is `arrow2::PrimitiveArray<u32>` (the 32-bit "logical" button
 /// bitmask from Slippi spec).
 fn inputs_for_port(game: &Game, port_idx: usize) -> Option<i32> {
-    let port_data = game.frames.ports.get(port_idx)?;
+    let port_data = game.frames.ports.get(frame_slot_for_port(game, port_idx)?)?;
     let buttons = &port_data.leader.pre.buttons;
     let n = buttons.len();
     if n < 2 {
@@ -306,7 +439,7 @@ fn inputs_for_port(game: &Game, port_idx: usize) -> Option<i32> {
 /// (i.e. the field is nullable), null slots count as "no attempt" and are
 /// skipped via `is_null`.
 fn l_cancel_counts_for_port(game: &Game, port_idx: usize) -> Option<(i32, i32)> {
-    let port_data = game.frames.ports.get(port_idx)?;
+    let port_data = game.frames.ports.get(frame_slot_for_port(game, port_idx)?)?;
     // `l_cancel` was added in Slippi spec v2.0 — peppi exposes it as
     // `Option<PrimitiveArray<u8>>`. Older replays simply won't have it.
     let l_cancel = port_data.leader.post.l_cancel.as_ref()?;
@@ -337,39 +470,72 @@ fn l_cancel_counts_for_port(game: &Game, port_idx: usize) -> Option<(i32, i32)> 
 impl GameData {
     pub fn new_gamedata(game: &peppi::game::immutable::Game) -> Result<GameData> {
         let metadata = game.metadata.as_ref().ok_or(anyhow!("no metadata found"))?;
-        let end = game.end.as_ref().ok_or(anyhow!("no end block found"))?;
-        let end_players = end
-            .players
-            .as_ref()
-            .ok_or(anyhow!("no end players found"))?;
 
-        // Sort end.players by placement so placements[0] is 1st place, [1] is 2nd, etc.
-        // peppi's end.players is otherwise given in port order, which is why the
-        // pre-refactor code treated whoever was in port 1 as the winner.
-        let mut sorted: Vec<&_> = end_players.iter().collect();
-        sorted.sort_by_key(|p| p.placement);
+        // Who was in the game. The GameEnd placement array is the best
+        // source when present, but it only exists from Slippi replay spec
+        // 3.13 on; older replays (all pre-2022 tournament footage) have a
+        // GameEnd block with nothing in it but the end method. Game Start
+        // lists the occupied ports in every spec version, so fall back to it
+        // rather than rejecting the replay.
+        let end_players = game.end.as_ref().and_then(|e| e.players.as_ref());
+        let ports: Vec<PortIndex> = match end_players {
+            Some(eps) => eps.iter().map(|p| PortIndex::from_peppi(p.port)).collect(),
+            None => ports_from_game_start(game),
+        };
 
-        let mut placements: [Option<SlippiPlayer>; 4] = [None, None, None, None];
-        let mut stocks_remaining: [Option<i32>; 4] = [None, None, None, None];
-        let mut starting_stocks: [Option<i32>; 4] = [None, None, None, None];
-        let mut inputs: [Option<i32>; 4] = [None, None, None, None];
-        let mut l_cancel_attempts: [Option<i32>; 4] = [None, None, None, None];
-        let mut l_cancel_success: [Option<i32>; 4] = [None, None, None, None];
+        // Finishing order. `None` means genuinely unknown — see
+        // [`derive_placements`] on why that is preferable to guessing.
+        let ranked: Option<Vec<PortIndex>> = match end_players {
+            Some(eps) => {
+                // peppi yields these in port order, not placement order.
+                // Sort so index 0 is genuinely first place.
+                let mut sorted: Vec<&_> = eps.iter().collect();
+                sorted.sort_by_key(|p| p.placement);
+                Some(
+                    sorted
+                        .iter()
+                        .map(|p| PortIndex::from_peppi(p.port))
+                        .collect(),
+                )
+            }
+            None => derive_placements(game, &ports),
+        };
 
-        for (i, player) in sorted.iter().take(4).enumerate() {
-            let (port, port_idx, peppi_port) = match player.port {
-                game::Port::P1 => (Port::P0, 0usize, game::Port::P1),
-                game::Port::P2 => (Port::P1, 1, game::Port::P2),
-                game::Port::P3 => (Port::P2, 2, game::Port::P3),
-                game::Port::P4 => (Port::P3, 3, game::Port::P4),
-            };
-            placements[i] = SlippiPlayer::new_slippi_player(metadata, port);
-            stocks_remaining[i] = final_stocks_for_port(game, port_idx);
-            starting_stocks[i] = starting_stocks_for_port(game, peppi_port);
-            inputs[i] = inputs_for_port(game, port_idx);
-            if let Some((att, suc)) = l_cancel_counts_for_port(game, port_idx) {
-                l_cancel_attempts[i] = Some(att);
-                l_cancel_success[i] = Some(suc);
+        let mut players: [Option<SlippiPlayer>; 4] = [None, None, None, None];
+        let mut placements: [Option<usize>; 4] = [None; 4];
+        let mut stocks_remaining: [Option<i32>; 4] = [None; 4];
+        let mut starting_stocks: [Option<i32>; 4] = [None; 4];
+        let mut inputs: [Option<i32>; 4] = [None; 4];
+        let mut l_cancel_attempts: [Option<i32>; 4] = [None; 4];
+        let mut l_cancel_success: [Option<i32>; 4] = [None; 4];
+
+        // Everything here is written at the player's *port*, which keeps this
+        // struct aligned with the port-keyed frame analysis.
+        for port in ports.iter().take(4) {
+            let idx = port.as_usize();
+
+            // Frame-derived stats are facts about the port, so record them
+            // whether or not the player behind it can be identified.
+            stocks_remaining[idx] = final_stocks_for_port(game, idx);
+            starting_stocks[idx] = starting_stocks_for_port(game, port.to_peppi());
+            inputs[idx] = inputs_for_port(game, idx);
+            if let Some((att, suc)) = l_cancel_counts_for_port(game, idx) {
+                l_cancel_attempts[idx] = Some(att);
+                l_cancel_success[idx] = Some(suc);
+            }
+
+            players[idx] = SlippiPlayer::resolve(game, metadata, *port);
+        }
+
+        // A port only claims a placement slot once the player behind it is
+        // identified. An unidentifiable player leaves the slot `None` rather
+        // than recording a finishing position nobody can be attached to.
+        if let Some(ranked) = ranked {
+            for (rank, port) in ranked.iter().take(4).enumerate() {
+                let idx = port.as_usize();
+                if players[idx].is_some() {
+                    placements[rank] = Some(idx);
+                }
             }
         }
 
@@ -387,13 +553,29 @@ impl GameData {
         // Punish extraction is 1v1-only today. For 2v2 / FFA, the extractor
         // returns `Err` which we swallow — those replays still get ingested,
         // just without any punish rows.
-        let punishes = extract_punishes_1v1(game).unwrap_or_default();
+        let punishes_result = extract_punishes_1v1(game);
 
         // Advanced combat stats, same 1v1-only best-effort contract: a non-1v1
         // game or sparse frame data yields `None` and the rows store NULLs.
-        let advanced = compute_advanced_stats_1v1(game).ok();
+        //
+        // The punish list computed above is threaded in rather than let the
+        // stats recompute it, which would walk every frame of the replay a
+        // second time for an identical answer. `advanced` stays `None` when
+        // punish extraction failed: the stats are derived from those punishes,
+        // so there is nothing meaningful to record without them.
+        let advanced = match punishes_result.as_ref() {
+            Ok(punishes) => compute_analysis_1v1(game)
+                .ok()
+                .and_then(|analysis| {
+                    compute_advanced_stats_1v1_with(game, &analysis, punishes).ok()
+                }),
+            Err(_) => None,
+        };
+
+        let punishes = punishes_result.unwrap_or_default();
 
         Ok(GameData {
+            players,
             placements,
             stocks_remaining,
             starting_stocks,
@@ -408,8 +590,29 @@ impl GameData {
         })
     }
 
-    pub fn placements(&self) -> &[Option<SlippiPlayer>; 4] {
+    /// Players indexed by 0-based port. See [`GameData::players`].
+    pub fn players(&self) -> &[Option<SlippiPlayer>; 4] {
+        &self.players
+    }
+
+    /// Ports indexed by finishing position. See [`GameData::placements`].
+    pub fn placements(&self) -> &[Option<usize>; 4] {
         &self.placements
+    }
+
+    /// The player who finished in position `rank` (0 = winner).
+    pub fn player_at_placement(&self, rank: usize) -> Option<&SlippiPlayer> {
+        let port = (*self.placements.get(rank)?)?;
+        self.players.get(port)?.as_ref()
+    }
+
+    /// Finishing position of the player on `port`, or `None` if that port
+    /// was empty. Linear over 4 elements — the inverse direction is rare
+    /// enough not to warrant a second stored array that could drift.
+    pub fn placement_of_port(&self, port: usize) -> Option<usize> {
+        self.placements
+            .iter()
+            .position(|slot| *slot == Some(port))
     }
 
     pub fn stage(&self) -> i32 {
@@ -422,7 +625,7 @@ impl GameData {
 
     /// Returns the 1st-place finisher, if any.
     pub fn winner(&self) -> Option<&SlippiPlayer> {
-        self.placements[0].as_ref()
+        self.player_at_placement(0)
     }
 
     /// Game length in whole seconds.
@@ -437,13 +640,95 @@ impl GameData {
     }
 }
 
+/// A controller port, held **0-indexed**.
+///
+/// Two external contracts use the 0-based numbering and this type carries
+/// it for both:
+///
+/// - Slippi's replay metadata keys `players` by the 0-based index
+///   (`"0"`..`"3"`) — see [`PortIndex::metadata_key`].
+/// - The `gamePlayer.port` column stores the same 0-based value — that's
+///   the `Into<i32>` impl.
+///
+/// peppi's [`game::Port`], by contrast, names its variants after the
+/// human-facing player number: **`game::Port::P1` is the FIRST port**,
+/// i.e. `PortIndex::P0`. The two enums therefore share variant names that
+/// mean *different* ports, which the compiler cannot catch. Convert only at
+/// the boundary, via [`PortIndex::from_peppi`] / [`PortIndex::to_peppi`],
+/// and never mix the two types in the same expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TryFrom, Into, Display)]
 #[repr(i32)]
-pub enum Port {
+pub enum PortIndex {
     P0,
     P1,
     P2,
     P3,
+}
+
+impl PortIndex {
+    /// Every port, in index order. Handy for `for port in PortIndex::ALL`.
+    pub const ALL: [PortIndex; 4] = [
+        PortIndex::P0,
+        PortIndex::P1,
+        PortIndex::P2,
+        PortIndex::P3,
+    ];
+
+    /// Convert from peppi's 1-indexed-by-name port enum. This is the only
+    /// place the off-by-one between the two namings is applied.
+    pub fn from_peppi(port: game::Port) -> Self {
+        match port {
+            game::Port::P1 => PortIndex::P0,
+            game::Port::P2 => PortIndex::P1,
+            game::Port::P3 => PortIndex::P2,
+            game::Port::P4 => PortIndex::P3,
+        }
+    }
+
+    /// Inverse of [`Self::from_peppi`], for the peppi APIs that want their
+    /// own enum (e.g. indexing `game.start.players`).
+    pub fn to_peppi(self) -> game::Port {
+        match self {
+            PortIndex::P0 => game::Port::P1,
+            PortIndex::P1 => game::Port::P2,
+            PortIndex::P2 => game::Port::P3,
+            PortIndex::P3 => game::Port::P4,
+        }
+    }
+
+    /// 0-based port number, for this crate's `[T; 4]` port-keyed arrays.
+    ///
+    /// Not a slot index into `game.frames.ports[..]` — that vector is dense
+    /// over occupied ports. Use [`frame_slot_for_port`] to cross over.
+    pub fn as_usize(self) -> usize {
+        match self {
+            PortIndex::P0 => 0,
+            PortIndex::P1 => 1,
+            PortIndex::P2 => 2,
+            PortIndex::P3 => 3,
+        }
+    }
+
+    /// Build from a 0-based index; `None` if out of range.
+    pub fn from_index(idx: usize) -> Option<Self> {
+        PortIndex::ALL.get(idx).copied()
+    }
+
+    /// The key this port has in Slippi's metadata `players` object.
+    ///
+    /// Spelled out rather than leaning on `to_string()`: the `Display`
+    /// derive happens to emit the discriminant (`"0"`..`"3"`), but that's
+    /// a property of the `soccer` derive macro, not something the metadata
+    /// format guarantees will keep matching. Swapping derive crates would
+    /// otherwise silently break every metadata lookup.
+    pub fn metadata_key(self) -> &'static str {
+        match self {
+            PortIndex::P0 => "0",
+            PortIndex::P1 => "1",
+            PortIndex::P2 => "2",
+            PortIndex::P3 => "3",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -451,32 +736,83 @@ pub struct SlippiPlayer {
     pub netplay: String,
     pub code: String,
     pub character: i32,
-    pub port: Port,
+    /// 0-based controller port. Doubles as this player's index into
+    /// [`GameData`]'s port-keyed arrays.
+    pub port: PortIndex,
 }
 
 impl SlippiPlayer {
+    /// Identify the player on `port`, preferring the metadata block and
+    /// falling back to Game Start.
+    ///
+    /// Metadata is richer — it carries the netplay name and connect code —
+    /// but console-recorded replays write `"players": {}` and keep nothing
+    /// at all. Game Start always has the character, so a replay with no
+    /// metadata players still yields a usable (if anonymous) player.
+    pub fn resolve(
+        game: &Game,
+        metadata: &map::Map<string::String, value::Value>,
+        port: PortIndex,
+    ) -> Option<SlippiPlayer> {
+        SlippiPlayer::new_slippi_player(metadata, port)
+            .or_else(|| SlippiPlayer::from_game_start(game, port))
+    }
+
+    /// Build a player from the Game Start block alone.
+    ///
+    /// Yields an anonymous player: Game Start records the character but no
+    /// identity, so `netplay` and `code` come back empty. See
+    /// [`SlippiPlayer::is_anonymous`] for what that means downstream.
+    pub fn from_game_start(game: &Game, port: PortIndex) -> Option<SlippiPlayer> {
+        let start = game
+            .start
+            .players
+            .iter()
+            .find(|p| p.port == port.to_peppi())?;
+        // Game Start stores the *external* character id; ours are internal.
+        let character = external_to_internal_character(start.character)?;
+        Some(SlippiPlayer {
+            netplay: String::new(),
+            code: String::new(),
+            character,
+            port,
+        })
+    }
+
+    /// Whether this player carries no identity — the replay recorded a
+    /// character but no netplay name or connect code.
+    ///
+    /// Per-player features key on `code`, so every anonymous player in a
+    /// database collapses into a single bucket. That is fine for the
+    /// character/stage/matchup analytics, which never look at identity, and
+    /// meaningless for per-player summaries. Keep a corpus of anonymous
+    /// replays in its own database rather than mixing it into one that has
+    /// real connect codes in it.
+    pub fn is_anonymous(&self) -> bool {
+        self.code.is_empty()
+    }
+
     pub fn new_slippi_player(
         metadata: &map::Map<string::String, value::Value>,
-        port: Port,
+        port: PortIndex,
     ) -> Option<SlippiPlayer> {
-        let port_int: i32 = port.into();
-        let port_string = port.to_string();
+        let port_string = port.metadata_key();
 
-        let netplay = match &metadata["players"][&port_string]["names"]["netplay"] {
+        let netplay = match &metadata["players"][port_string]["names"]["netplay"] {
             value::Value::String(n) => n.clone(),
             _ => {
                 return None;
             }
         };
 
-        let code = match &metadata["players"][&port_string]["names"]["code"] {
+        let code = match &metadata["players"][port_string]["names"]["code"] {
             value::Value::String(c) => c.clone(),
             _ => {
                 return None;
             }
         };
 
-        let characters = &metadata["players"][&port_string]["characters"].as_object();
+        let characters = &metadata["players"][port_string]["characters"].as_object();
 
         let characters = match characters {
             Some(c) => c,
@@ -524,7 +860,7 @@ impl SlippiPlayer {
         self.character
     }
 
-    pub fn port(&self) -> Port {
+    pub fn port(&self) -> PortIndex {
         self.port
     }
 }
@@ -536,15 +872,51 @@ mod tests {
     #[test]
     fn port_roundtrip_int() {
         for (p, expected) in [
-            (Port::P0, 0),
-            (Port::P1, 1),
-            (Port::P2, 2),
-            (Port::P3, 3),
+            (PortIndex::P0, 0),
+            (PortIndex::P1, 1),
+            (PortIndex::P2, 2),
+            (PortIndex::P3, 3),
         ] {
             let as_int: i32 = p.into();
             assert_eq!(as_int, expected);
-            let back: Port = Port::try_from(expected).expect("try_from");
+            let back: PortIndex = PortIndex::try_from(expected).expect("try_from");
             assert_eq!(back, p);
+            assert_eq!(p.as_usize(), expected as usize);
+            assert_eq!(PortIndex::from_index(expected as usize), Some(p));
+        }
+    }
+
+    /// peppi names ports after the human-facing player number, this crate
+    /// after the 0-based index. Pin the off-by-one so a refactor that
+    /// "tidies" one of the two enums fails loudly here instead of silently
+    /// attributing every stat to the wrong player.
+    #[test]
+    fn peppi_port_is_one_indexed_by_name() {
+        for (peppi, ours, idx) in [
+            (game::Port::P1, PortIndex::P0, 0usize),
+            (game::Port::P2, PortIndex::P1, 1),
+            (game::Port::P3, PortIndex::P2, 2),
+            (game::Port::P4, PortIndex::P3, 3),
+        ] {
+            assert_eq!(PortIndex::from_peppi(peppi), ours);
+            assert_eq!(ours.to_peppi(), peppi);
+            assert_eq!(ours.as_usize(), idx);
+        }
+    }
+
+    /// Slippi's metadata `players` object is keyed by the 0-based port index
+    /// as a string. `metadata_key` spells those keys out rather than deriving
+    /// them from `Display`, and this pins the two to the same answer.
+    #[test]
+    fn metadata_key_is_zero_based_string() {
+        for (port, key) in [
+            (PortIndex::P0, "0"),
+            (PortIndex::P1, "1"),
+            (PortIndex::P2, "2"),
+            (PortIndex::P3, "3"),
+        ] {
+            assert_eq!(port.metadata_key(), key);
+            assert_eq!(port.to_string(), key);
         }
     }
 

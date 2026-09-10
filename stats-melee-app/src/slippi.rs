@@ -159,10 +159,11 @@ fn current_platform() -> Platform {
     }
 }
 
-/// Test-friendly variant of [`plan_launch`] — uses the static
-/// [`default_binary_for_platform`] fallback (no IO, no Spotlight) so
-/// tests pin down deterministic behavior across platforms. Prefer
-/// [`plan_launch`] in production code.
+/// Test-only variant of [`plan_launch`] — uses the static
+/// [`default_binary_for_platform`] fallback (no IO, no Spotlight) so the
+/// tests below pin down deterministic behavior across platforms.
+/// Production always goes through [`plan_launch`].
+#[cfg(test)]
 pub fn plan_for_platform(
     replay_path: &str,
     comm_file_path: &Path,
@@ -179,10 +180,25 @@ pub fn plan_for_platform(
     )
 }
 
+/// Static per-platform fallback behind [`plan_for_platform`]. Production
+/// uses [`find_default_binary_for_current_platform`], which also stats real
+/// install dirs and can call out to Spotlight.
+#[cfg(test)]
+fn default_binary_for_platform(platform: Platform) -> Result<PathBuf, SlippiLaunchError> {
+    match platform {
+        Platform::MacOs => Ok(PathBuf::from(
+            "/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin",
+        )),
+        Platform::Linux | Platform::Windows | Platform::Unknown => {
+            Err(SlippiLaunchError::NoDefaultForPlatform)
+        }
+    }
+}
+
 /// Pure core of launch planning. `resolved_default` is the
 /// already-discovered platform default binary (if any) — the caller
-/// decides whether to get it via IO lookup ([`plan_launch`]) or via
-/// the static fallback ([`plan_for_platform`]).
+/// decides whether to get it via IO lookup ([`plan_launch`]) or, in
+/// tests, via the static fallback.
 fn plan_with_default(
     replay_path: &str,
     comm_file_path: &Path,
@@ -242,21 +258,6 @@ pub fn predict_app_inner_binary(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
     let app_name = name.strip_suffix(".app")?;
     Some(path.join("Contents").join("MacOS").join(app_name))
-}
-
-/// Static per-platform fallback. Used by [`plan_for_platform`] for
-/// unit-test determinism; production uses
-/// [`find_default_binary_for_current_platform`] which also stats real
-/// install dirs and can call out to Spotlight.
-fn default_binary_for_platform(platform: Platform) -> Result<PathBuf, SlippiLaunchError> {
-    match platform {
-        Platform::MacOs => Ok(PathBuf::from(
-            "/Applications/Slippi Dolphin.app/Contents/MacOS/Slippi Dolphin",
-        )),
-        Platform::Linux | Platform::Windows | Platform::Unknown => {
-            Err(SlippiLaunchError::NoDefaultForPlatform)
-        }
-    }
 }
 
 // --- IO-based discovery -----------------------------------------------------

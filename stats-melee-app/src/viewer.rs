@@ -618,7 +618,8 @@ pub fn render_viewer(ui: &mut egui::Ui, icons: &mut crate::icons::IconCache, sta
     ui.add_space(18.0);
     render_combat_timeline(ui, state);
 
-    // Quiet footer: the bookkeeping that used to live in the metadata grid.
+    // Quiet footer: file path and other bookkeeping, kept out of the
+    // metadata grid so it doesn't compete with the match data.
     ui.add_space(14.0);
     let path = state.replay_path.as_deref().unwrap_or("(no file path recorded)");
     ui.label(
@@ -868,9 +869,8 @@ fn h2h_row(
     });
 }
 
-/// The combat-state timeline section (key-moment markers + colored scrub bar
-/// + legend), unchanged in behavior from before — just extracted so
-/// `render_viewer` reads as a sequence of cards/sections.
+/// The combat-state timeline section: key-moment markers, the colored scrub
+/// bar, and the legend.
 fn render_combat_timeline(ui: &mut egui::Ui, state: &ViewerState) {
     match &state.analysis {
         Ok(analysis) => {

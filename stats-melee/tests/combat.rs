@@ -96,7 +96,6 @@ fn combat_summary_proportions_are_reasonable() {
     let in_combat = summary.adv_p1 + summary.adv_p2 + summary.trade;
     assert!(
         in_combat > 0.005,
-        "only {:.4} of frames show anyone in hitstun — unexpected for a real replay corpus",
-        in_combat
+        "only {in_combat:.4} of frames show anyone in hitstun — unexpected for a real replay corpus"
     );
 }

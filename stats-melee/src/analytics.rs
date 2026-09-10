@@ -50,7 +50,7 @@ impl fmt::Display for WinAnalytics {
             .collect();
         opponents_sorted.sort_by(|a, b| b.1.total.cmp(&a.1.total));
         for (opponent, wp) in opponents_sorted.into_iter().take(50) {
-            writeln!(f, "  {} -- {}", opponent, wp)?;
+            writeln!(f, "  {opponent} -- {wp}")?;
         }
 
         writeln!(f, "\nStage stats:")?;
