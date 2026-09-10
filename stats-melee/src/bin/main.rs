@@ -2,6 +2,7 @@ use anyhow::Result;
 use stats_melee::*;
 use std::env;
 use std::path::PathBuf;
+use std::io::{self, Write};
 
 fn main() -> Result<()> {
     println!("parsing new replays...");
@@ -22,13 +23,28 @@ fn main() -> Result<()> {
 
     let db_path = database_url()?;
     let new_games = parse_new_replays(&mut connection, &root, &db_path)?;
-    println!("{} new replays added", new_games);
+    println!("{new_games} new replays added");
 
     let code = prompt_user("enter code: ", false)?;
     let games = filter_games(&mut connection, &code)?;
     let analytics = analyze_games(&mut connection, &games, &code)?;
 
-    println!("{}", analytics);
+    println!("{analytics}");
 
     Ok(())
+}
+
+fn prompt_user(prompt: &str, newline: bool) -> Result<String> {
+
+    if newline {
+        println!("{prompt}");
+    } else {
+        print!("{prompt}");
+    }
+
+    io::stdout().flush()?;
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    let response = response.trim_end().to_owned();
+    Ok(response)
 }

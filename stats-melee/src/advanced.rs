@@ -22,8 +22,8 @@ use anyhow::Result;
 use peppi::frame::immutable::Post;
 use peppi::game::immutable::Game;
 
-use crate::combat::{compute_analysis_1v1, CombatState};
-use crate::punish::extract_punishes_1v1;
+use crate::combat::{compute_analysis_1v1, CombatState, ReplayAnalysis};
+use crate::punish::{extract_punishes_1v1, RawPunish};
 use crate::stage_bounds::{stage_bounds, StageBounds};
 
 /// One player's raw advanced counters for a single 1v1 game. Ratios are
@@ -109,7 +109,20 @@ fn frame_offstage(bounds: Option<StageBounds>, post: &Post, i: usize) -> bool {
 pub fn compute_advanced_stats_1v1(game: &Game) -> Result<AdvancedStats> {
     let analysis = compute_analysis_1v1(game)?;
     let punishes = extract_punishes_1v1(game)?;
+    compute_advanced_stats_1v1_with(game, &analysis, &punishes)
+}
 
+/// [`compute_advanced_stats_1v1`] over inputs the caller already has.
+///
+/// Both inputs are full walks over the game's frames. Ingestion already
+/// holds them — it stores the punishes in their own table — so it passes
+/// them in rather than paying for the walks twice. The wrapper above is for
+/// callers holding neither.
+pub fn compute_advanced_stats_1v1_with(
+    game: &Game,
+    analysis: &ReplayAnalysis,
+    punishes: &[RawPunish],
+) -> Result<AdvancedStats> {
     let i1 = analysis.p1_port_idx;
     let i2 = analysis.p2_port_idx;
     let combat = &analysis.combat;
@@ -141,7 +154,7 @@ pub fn compute_advanced_stats_1v1(game: &Game) -> Result<AdvancedStats> {
     }
 
     // --- Per-punish: openings, damage, neutral wins, edge-guards -----------
-    for pun in &punishes {
+    for pun in punishes {
         let attacker_is_p1 = pun.attacker_port_idx == i1;
         let (victim_percent, victim_offstage) = if pun.victim_port_idx == i1 {
             (&percent1, &offstage1)

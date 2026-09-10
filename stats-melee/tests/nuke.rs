@@ -10,6 +10,7 @@
 
 use std::fs;
 
+use stats_melee::gamedata::{GameData, PortIndex, SlippiPlayer};
 use stats_melee::{is_games_empty, nuke_replay, nuke_replays, parse_new_replays};
 use stats_melee::testing::{fixture_slps_or_skip, TestDb};
 
@@ -181,4 +182,85 @@ fn per_row_delete_returns_zero_for_missing_id() {
         deleted, 0,
         "deleting a non-existent game should report 0 rows removed (not error)"
     );
+}
+
+
+/// Fixture-free nuke coverage.
+///
+/// The tests above need the local-only `.slp` corpus and skip without it, so
+/// on a clean checkout nothing exercised `nuke_replays` at all — which is how
+/// a wrong DELETE order shipped: `gamePlayer` was being deleted while `game`
+/// rows still referenced it via first/second/third/fourth.
+///
+/// That stayed dormant only while foreign keys were unenforced. Building
+/// SQLite through `libsqlite3-sys`'s `bundled` feature compiles it with
+/// `-DSQLITE_DEFAULT_FOREIGN_KEYS=1` (stock SQLite defaults the pragma OFF),
+/// so the constraint became live and every nuke on a non-empty library failed
+/// with "FOREIGN KEY constraint failed".
+///
+/// These synthesize `GameData` directly so the invariant holds on any
+/// checkout, corpus or not.
+mod without_fixtures {
+    use super::*;
+    use stats_melee::post_game;
+
+    fn game_with_two_players(code_a: &str, code_b: &str) -> GameData {
+        let mut players: [Option<SlippiPlayer>; 4] = [None, None, None, None];
+        players[0] = Some(SlippiPlayer {
+            netplay: "A".to_string(),
+            code: code_a.to_string(),
+            character: 2,
+            port: PortIndex::P0,
+        });
+        players[1] = Some(SlippiPlayer {
+            netplay: "B".to_string(),
+            code: code_b.to_string(),
+            character: 9,
+            port: PortIndex::P1,
+        });
+
+        GameData {
+            players,
+            placements: [Some(0), Some(1), None, None],
+            stocks_remaining: [Some(2), Some(0), None, None],
+            starting_stocks: [Some(4), Some(4), None, None],
+            inputs: [Some(900), Some(950), None, None],
+            l_cancel_attempts: [None; 4],
+            l_cancel_success: [None; 4],
+            punishes: Vec::new(),
+            advanced: None,
+            stage: 8,
+            time: 180,
+            started_at: None,
+        }
+    }
+
+    /// The regression: `game` references `gamePlayer`, so it has to be
+    /// deleted first. Reversing the order fails outright under enforced FKs.
+    #[test]
+    fn nuke_replays_succeeds_with_referenced_game_players() {
+        let mut db = TestDb::new().expect("test db");
+        post_game(&mut db.conn, &game_with_two_players("AAA#1", "BBB#2")).expect("post_game 1");
+        post_game(&mut db.conn, &game_with_two_players("CCC#3", "DDD#4")).expect("post_game 2");
+
+        let deleted = nuke_replays(&mut db.conn).expect("nuke_replays must not violate FKs");
+        assert_eq!(deleted, 2, "both games removed");
+        assert!(is_games_empty(&mut db.conn).expect("is_games_empty"));
+    }
+
+    /// Single-replay delete leaves `gamePlayer` alone (those rows are shared
+    /// across games), so it must stay FK-clean too.
+    #[test]
+    fn nuke_replay_single_succeeds_and_leaves_other_games() {
+        let mut db = TestDb::new().expect("test db");
+        let keep = post_game(&mut db.conn, &game_with_two_players("AAA#1", "BBB#2"))
+            .expect("post_game keep");
+        let drop = post_game(&mut db.conn, &game_with_two_players("CCC#3", "DDD#4"))
+            .expect("post_game drop");
+
+        let deleted = nuke_replay(&mut db.conn, drop.id).expect("nuke_replay");
+        assert_eq!(deleted, 1);
+        assert!(!is_games_empty(&mut db.conn).expect("is_games_empty"));
+        let _ = keep;
+    }
 }

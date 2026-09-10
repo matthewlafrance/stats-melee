@@ -39,14 +39,14 @@ fn punishes_ingest_and_satisfy_invariants() {
         // extractor returns empty for non-1v1 via `unwrap_or_default()` in
         // `new_gamedata`, but we can only meaningfully assert non-empty punish
         // output on actual 1v1 games, so filter here.
-        let populated = gd.placements.iter().filter(|p| p.is_some()).count();
+        let populated = gd.players.iter().filter(|p| p.is_some()).count();
         if populated != 2 {
             continue;
         }
 
         // Bump the per-code appearance count so we can pick a reasonable
         // target for the aggregate queries below.
-        for slot in gd.placements.iter().flatten() {
+        for slot in gd.players.iter().flatten() {
             *code_counts.entry(slot.code().to_string()).or_insert(0) += 1;
         }
 
@@ -226,7 +226,7 @@ fn repeated_ingestion_yields_matching_punish_counts() {
             Ok(g) => g,
             Err(_) => continue,
         };
-        let populated = gd.placements.iter().filter(|p| p.is_some()).count();
+        let populated = gd.players.iter().filter(|p| p.is_some()).count();
         if populated != 2 || gd.punishes.is_empty() {
             continue;
         }

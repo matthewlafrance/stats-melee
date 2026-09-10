@@ -70,7 +70,7 @@ fn parsed_fixtures_have_sane_invariants() {
         let gd = parse_single_replay(&slp)
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", slp.display()));
 
-        let player_count = gd.placements.iter().filter(|p| p.is_some()).count();
+        let player_count = gd.players.iter().filter(|p| p.is_some()).count();
         assert!(
             player_count >= 2,
             "{} has only {} player(s)",
@@ -92,7 +92,7 @@ fn parsed_fixtures_have_sane_invariants() {
             gd.time
         );
 
-        for slot in gd.placements.iter().flatten() {
+        for slot in gd.players.iter().flatten() {
             assert!(
                 (slot.character as usize) < CHARACTERS.len(),
                 "{} has out-of-range character {}",
@@ -103,9 +103,9 @@ fn parsed_fixtures_have_sane_invariants() {
     }
 }
 
-/// `placements[0]` should be the winner (1st place). We don't know the winner
-/// for every fixture a priori, but we can at least assert consistency: the
-/// winner slot is populated whenever any slot is.
+/// `placements[0]` holds the winner's port. We don't know the winner for every
+/// fixture a priori, but we can at least assert consistency: the winner slot
+/// resolves to a player whenever any port is populated.
 #[test]
 fn winner_slot_populated_when_any_player_is() {
     let Some(slps) = fixture_slps_or_skip() else {
@@ -116,7 +116,7 @@ fn winner_slot_populated_when_any_player_is() {
         let gd = parse_single_replay(&slp)
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", slp.display()));
 
-        let any_populated = gd.placements.iter().any(|p| p.is_some());
+        let any_populated = gd.players.iter().any(|p| p.is_some());
         if any_populated {
             assert!(
                 gd.winner().is_some(),
@@ -127,8 +127,8 @@ fn winner_slot_populated_when_any_player_is() {
     }
 }
 
-/// Stocks-remaining extraction should line up with placements: every slot that
-/// has a player should (almost always) also have a stocks value, and each
+/// Stocks-remaining extraction should line up with the player array: every port
+/// that has a player should (almost always) also have a stocks value, and each
 /// stocks value should be 0..=4 for a normal melee game.
 #[test]
 fn stocks_remaining_populated_and_sane() {
@@ -149,16 +149,16 @@ fn stocks_remaining_populated_and_sane() {
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", slp.display()));
         checked += 1;
 
-        for i in 0..4 {
-            if gd.placements[i].is_some() {
+        for port in 0..4 {
+            if gd.players[port].is_some() {
                 slots_with_player += 1;
-                if let Some(s) = gd.stocks_remaining[i] {
+                if let Some(s) = gd.stocks_remaining[port] {
                     slots_with_stocks += 1;
                     assert!(
                         (0..=4).contains(&s),
-                        "{} placement {} stocks={} out of melee range",
+                        "{} port {} stocks={} out of melee range",
                         slp.display(),
-                        i,
+                        port,
                         s
                     );
                 }
@@ -167,13 +167,16 @@ fn stocks_remaining_populated_and_sane() {
 
         // For 1v1 games we can additionally check that the winner's
         // stocks_remaining >= loser's (ties are possible but rare).
+        // Placements are rank -> port, so the winner's and loser's stocks
+        // have to be looked up through their ports rather than read off the
+        // front of the array.
         let is_1v1 = gd.placements[0].is_some()
             && gd.placements[1].is_some()
             && gd.placements[2].is_none()
             && gd.placements[3].is_none();
-        if let (true, Some(w), Some(l)) =
-            (is_1v1, gd.stocks_remaining[0], gd.stocks_remaining[1])
-        {
+        let winner_stocks = gd.placements[0].and_then(|port| gd.stocks_remaining[port]);
+        let loser_stocks = gd.placements[1].and_then(|port| gd.stocks_remaining[port]);
+        if let (true, Some(w), Some(l)) = (is_1v1, winner_stocks, loser_stocks) {
             total_1v1_comparisons += 1;
             winners_with_stocks += 1;
             losers_with_stocks += 1;
@@ -187,9 +190,7 @@ fn stocks_remaining_populated_and_sane() {
     // At least half of active slots should have stocks data (frame data present).
     assert!(
         slots_with_stocks * 2 >= slots_with_player,
-        "only {}/{} populated slots had stocks_remaining",
-        slots_with_stocks,
-        slots_with_player
+        "only {slots_with_stocks}/{slots_with_player} populated slots had stocks_remaining"
     );
 
     // For 1v1s with both stocks known, the winner should out-stock the loser

@@ -82,7 +82,7 @@ fn analytics_roundtrip_on_fixtures() {
     let mut codes_seen: Vec<String> = Vec::new();
     for slp in &sample {
         let gd = parse_single_replay(slp).expect("parse");
-        for slot in gd.placements.iter().flatten() {
+        for slot in gd.players.iter().flatten() {
             if !codes_seen.contains(&slot.code.clone()) {
                 codes_seen.push(slot.code.clone());
             }
@@ -185,9 +185,7 @@ fn analytics_roundtrip_on_fixtures() {
     // systematic failures while tolerating the occasional corrupt file.
     assert!(
         rows_with_stocks * 2 >= total_stat_rows,
-        "only {}/{} stat rows had stocks_remaining populated",
-        rows_with_stocks,
-        total_stat_rows
+        "only {rows_with_stocks}/{total_stat_rows} stat rows had stocks_remaining populated"
     );
 
     // Aggregate queries should return values in reasonable ranges.
@@ -196,8 +194,7 @@ fn analytics_roundtrip_on_fixtures() {
     let avg_placement = avg_placement.expect("target code should have stat rows");
     assert!(
         (0.0..=3.0).contains(&avg_placement),
-        "avg_placement {} out of range",
-        avg_placement
+        "avg_placement {avg_placement} out of range"
     );
 
     let avg_stocks = avg_stocks_remaining(&mut db.conn, &target_code)
@@ -205,8 +202,7 @@ fn analytics_roundtrip_on_fixtures() {
     if let Some(s) = avg_stocks {
         assert!(
             (0.0..=4.0).contains(&s),
-            "avg_stocks {} out of range (expected 0..=4 for melee)",
-            s
+            "avg_stocks {s} out of range (expected 0..=4 for melee)"
         );
     }
 
@@ -229,8 +225,7 @@ fn analytics_roundtrip_on_fixtures() {
     if let Some(lr) = summary.l_cancel_rate {
         assert!(
             (0.0..=1.0).contains(&lr),
-            "l_cancel_rate {} out of range",
-            lr
+            "l_cancel_rate {lr} out of range"
         );
     }
     if let Some(apm) = summary.avg_apm {
@@ -238,19 +233,17 @@ fn analytics_roundtrip_on_fixtures() {
         // a much higher value suggests a bug.
         assert!(
             (0.0..1000.0).contains(&apm),
-            "avg_apm {} unreasonable",
-            apm
+            "avg_apm {apm} unreasonable"
         );
     }
     if let Some(apl) = summary.avg_punish_length {
         assert!(
             apl >= 1.0,
-            "avg_punish_length {} < 1 (impossible — every punish has >=1 hit)",
-            apl
+            "avg_punish_length {apl} < 1 (impossible — every punish has >=1 hit)"
         );
     }
     if let Some(opk) = summary.openings_per_kill {
-        assert!(opk >= 1.0, "openings_per_kill {} < 1", opk);
+        assert!(opk >= 1.0, "openings_per_kill {opk} < 1");
     }
 
     // top_kill_moves is capped at TOP_KILL_MOVES_CAP.
@@ -290,7 +283,7 @@ fn player_summary_filtered_narrows_by_character_and_stage() {
     let mut codes_seen: Vec<String> = Vec::new();
     for slp in &sample {
         let gd = parse_single_replay(slp).expect("parse");
-        for slot in gd.placements.iter().flatten() {
+        for slot in gd.players.iter().flatten() {
             if !codes_seen.contains(&slot.code.clone()) {
                 codes_seen.push(slot.code.clone());
             }

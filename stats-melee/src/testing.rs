@@ -96,3 +96,80 @@ pub fn slps_in(root: &Path) -> Result<Vec<PathBuf>> {
     out.sort();
     Ok(out)
 }
+
+/// Every `.slp` under `root`, at any depth, sorted for determinism.
+///
+/// Unlike [`slps_in`], which lists one directory, this walks the whole tree —
+/// real replay corpora nest by date, character, or tournament, and a
+/// benchmark shouldn't care which. An unreadable subdirectory is skipped
+/// rather than failing the walk.
+pub fn slps_recursive(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("slp") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Materialize a corpus into the `root/<subdir>/*.slp` layout the ingester
+/// walks, returning the tempdir holding it and how many replays it holds.
+///
+/// Files are hard-linked where the filesystem allows and copied otherwise,
+/// so staging a large corpus costs neither time nor disk. Names are
+/// index-prefixed because a recursive scan turns up the same basename in
+/// several source directories.
+///
+/// Staging rather than pointing the ingester at the original tree is what
+/// makes measurements comparable: every run then sees one identical flat
+/// directory, in one identical order, whatever the source layout was.
+pub fn stage_corpus(src: &Path, limit: Option<usize>) -> (TempDir, usize) {
+    let mut slps = slps_recursive(src);
+    if let Some(n) = limit {
+        slps.truncate(n);
+    }
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let session = root.path().join("session-000");
+    std::fs::create_dir_all(&session).expect("create session dir");
+
+    for (i, slp) in slps.iter().enumerate() {
+        let name = slp.file_name().expect("replay has a filename");
+        let dest = session.join(format!("{i:06}-{}", name.to_string_lossy()));
+        if std::fs::hard_link(slp, &dest).is_err() {
+            std::fs::copy(slp, &dest).expect("stage replay by copy");
+        }
+    }
+
+    let staged = slps.len();
+    (root, staged)
+}
+
+/// Read a corpus path from an environment variable, expanding a leading
+/// `~/`. Returns `None` when the variable is unset, so opt-in benchmarks can
+/// skip cleanly.
+///
+/// The tilde handling matters: a shell does not expand `~` inside a quoted
+/// variable, and passing a quoted path is the most natural way to set these.
+pub fn corpus_from_env(var: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var).ok()?;
+    let expanded = match raw.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME").ok().filter(|h| !h.is_empty()) {
+            Some(home) => format!("{home}/{rest}"),
+            None => raw,
+        },
+        None => raw,
+    };
+    Some(PathBuf::from(expanded))
+}

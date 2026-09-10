@@ -4,6 +4,10 @@ target/
 # Local data / secrets
 .env
 *.db
+# SQLite's write-ahead log and shared-memory sidecars, created next to any
+# open database.
+*.db-wal
+*.db-shm
 
 # Large local binaries — kept on disk, not version-controlled.
 # The Melee ISO is required to run renders/tests but is copyrighted
@@ -20,9 +24,21 @@ stats-melee-app/assets/stages/*.png
 
 # Editor / OS cruft
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
 
 # Claude Code local settings (machine-specific)
-.claude/settings.local.json
+.claude/
 
 # Preserved history of the former nested stats-melee repo (see README/notes).
 /.stats-melee-git-backup/
+
+# Local corpus tooling (scripts/hf_slippi_sample.py)
+.hf-slippi-cache/
+
+# Python tooling under scripts/
+__pycache__/
+*.pyc
+.venv/
